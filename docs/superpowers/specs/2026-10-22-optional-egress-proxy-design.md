@@ -1,6 +1,6 @@
 # Optional outbound proxy for the T3 sandbox
 
-Status: proposed; awaiting user approval. Implementation must follow a separate plan.
+Status: revised proposal; awaiting user approval. Implementation must follow a separate plan.
 
 ## Intent and agreed requirements
 
@@ -10,7 +10,16 @@ uses Codex and also wants a predefined Claude allowlist.
 
 - Restricted mode is optional and defaults to off. Off uses ordinary outbound
   networking and creates or requires no proxy container.
-- On uses a separate proxy container, with policy in a new YAML file.
+- On uses a separate proxy container. One host-side YAML profile combines
+  launcher settings and network policy; there is no separate `.env` or live
+  `network.yaml` to keep in sync.
+- Named profiles support independent parallel sandboxes. All Make commands select
+  a profile through `PROFILE=<name>`, defaulting to `default`.
+- Editing the whitelist and restarting only the proxy must leave the T3 container
+  and its jobs running. The user explicitly accepts brief interruption of
+  management connections and active outbound streams during that restart.
+- `make firewall-logs` writes denied proxy connection requests to stdout to help
+  the user maintain the whitelist.
 - T3 must not directly reach the internet, host, LAN, or unrelated containers.
 - Incoming management connections and their replies must remain functional,
   published on host `0.0.0.0`. The current management service is TCP 3773 and
@@ -29,6 +38,8 @@ configuration, documentation, and integration verification.
 slirp4netns for outbound access. It runs as the matching host UID/GID, with all
 capabilities dropped and `no-new-privileges`. Project and selected provider
 state directories are writable bind mounts; the rest of its home is a volume.
+The existing `.env` and Make/environment setting overrides will be replaced by
+named YAML profiles; the current `SANDBOX` selector becomes `PROFILE`.
 
 `Dockerfile` already installs a broad toolchain and the provider CLIs. The cached
 T3 package is a launcher for a self-contained executable. Its `t3 browser` command
@@ -54,9 +65,9 @@ path. This is a required control, not optional hardening.
 
 ## Network topology and invariants
 
-Each sandbox in restricted mode owns one private bridge network, one external
+Each profile in restricted mode owns one private bridge network, one external
 network, one proxy container, and its T3 container. Names and ownership labels
-include the host UID and sandbox name. T3 has only the private network; the proxy
+include the host UID and profile name. T3 has only the private network; the proxy
 has both networks. They do not share network, PID, or IPC namespaces.
 
 The private bridge has DNS disabled, no IPv4/IPv6 address in Podman's host-side
@@ -120,44 +131,140 @@ separate identities, minimal writable temporary paths, and no project/provider
 credential mounts. If either required daemon fails, terminate the proxy
 container rather than report partial health.
 
-## Policy and host configuration
+## Unified configuration profiles
 
-Add `NETWORK_RESTRICTED=0`, `NETWORK_POLICY_FILE`, and `HOST_BIND_ADDRESS=0.0.0.0`
-to launcher configuration. Off keeps normal networking; the requested externally
-reachable management binding applies in both modes. Users can explicitly select
-loopback with `HOST_BIND_ADDRESS=127.0.0.1`. `HOST_PORT` continues to select the
-host port mapped to T3's 3773.
+The sole editable launcher/policy configuration is
+`${HOME}/.config/t3-sandbox/profiles/<name>.yaml`. `HOME` means the host Linux
+user's home directory. Ship a commented `config/profile.default.yaml` template
+with the same defaults. A bootstrap-only `PROFILE_DIR` selector may choose an
+alternative host directory; this is not an additional launcher settings file.
+Keep it outside every T3-writable mount.
 
-Ship a documented YAML template in the repository. Initialize the live policy
-at `${HOME}/.config/t3-sandbox/<sandbox>/network.yaml` on the host, outside all
-T3-visible writable mounts. Never overwrite an existing live policy. Validate
-resolved paths and reject live policy paths inside the project or shared state
-mounts. A read-only mount alone does not protect a source file that T3 can edit
-through another mount.
+Every Make command accepts `PROFILE=<name>` and otherwise selects `default`:
 
-Use a host-owned validated snapshot for a running proxy, outside T3's mounts;
-mount it read-only into the proxy. Changes take effect with `make recreate`.
-Do not reload a mutable workspace file. Track the policy digest and network mode
-in resource labels; `make start` must refuse changed settings until recreation.
+```bash
+make start
+make init PROFILE=work
+make start PROFILE=work
+make status PROFILE=work
+make proxy-restart PROFILE=work
+make firewall-logs PROFILE=work
+make stop PROFILE=work
+```
 
-Proposed schema (the actual file is created during implementation):
+Profile names must pass the existing safe sandbox-name validation and cannot
+contain slashes or traverse directories. A profile name is also its resource
+identity; do not introduce an independent `sandbox` property that can collide.
+Recovery/read commands such as `stop`, `status`, `logs`, and `firewall-logs`
+resolve owned resources from that identity without requiring a valid edited
+whitelist. A malformed whitelist must not prevent stopping the sandbox or
+reading why requests were denied.
+
+If `default.yaml` does not exist, atomically create it from the repository
+template with reasonable resolved defaults and report its path. Never overwrite
+an existing file. A missing nondefault profile is an error pointing to
+`make init PROFILE=<name>`; do not create profiles silently after a typo.
+Initialization is idempotent and concurrent creation must not clobber a file.
+
+Defaults are unrestricted networking, host bind `0.0.0.0`, management port 3773,
+the existing toolchain/resource defaults, and a dedicated project directory at
+`~/projects/t3-sandbox/<profile>`. Create that dedicated project directory on
+first start if the profile permits it; do not mount the host home or `/`.
+`make init` for another profile chooses and persists the next unused management
+port starting at 3773, accounting for existing profiles and host listeners.
+Once saved, never silently change the selected port on startup; report a
+collision and let the user edit it. Concurrent starts still handle bind failure.
+
+Give each profile its own T3 state/home by default. Preserve the option to reuse
+host Codex/Claude state, but do not share `.t3` between default-created profiles:
+multiple T3 servers cannot safely share it. Explicitly configured shared `.t3`
+paths require collision detection before starting parallel profiles. Images may
+be shared deliberately, but default image tags include UID/profile so building
+one profile with different tool versions does not overwrite another's image.
+
+All build selectors, project path, management binding, resources, state mounts,
+runtime env-file reference, and network policy live in this YAML. Defaults can
+fill omitted fields; `make config` displays the effective configuration and its
+source path. Values are parsed as data, never sourced as Bash. Support `~` and
+`${HOME}` in path fields only, without command substitution or arbitrary shell
+expansion. Add host Python/PyYAML as an explicit prerequisite; the host must be
+able to parse profiles even when no proxy image/container exists.
+
+`PROFILE`, `PROFILE_DIR`, and execution/logging command arguments are selectors,
+not overrides for persisted launcher settings. Remove implicit `.env` sourcing
+and legacy settings overrides. Document a manual migration mapping from the
+current `.env`; do not execute it automatically. Existing containers/volumes
+remain untouched until the user explicitly selects a migration/recreation path.
+An optional secret runtime env file remains separate by reference: it contains
+credentials, not a second launcher or whitelist configuration.
+
+Proposed profile shape (actual template and parser are implementation work):
 
 ```yaml
 version: 1
-allow:
-  domains:
-    - api.openai.com
-    - auth.openai.com
-    - chatgpt.com
-    - api.anthropic.com
-    - claude.ai
-    - platform.claude.com
-    - console.anthropic.com
-    - t3.codes
-    - app.t3.codes
-  ips: []
-  ports: [443]
+project:
+  directory: ~/projects/t3-sandbox/default
+  create_if_missing: true
+server:
+  bind_address: 0.0.0.0
+  port: 3773
+  advertised_url: null
+build:
+  image: null # derive from host UID and profile name
+  ubuntu_image: docker.io/library/ubuntu:rolling
+  node_image: docker.io/library/node:24-bookworm-slim
+  codex_version: latest
+  claude_version: latest
+  t3_version: latest
+resources:
+  memory: 8g
+  cpus: 4
+  pids_limit: 2048
+state:
+  share_host_state: true
+  share_host_t3_state: false
+  t3_directory: ~/.t3
+  codex_directory: ~/.codex
+  claude_directory: ~/.claude
+runtime:
+  env_file: null
+  automatic_healthcheck: false
+network:
+  restricted: false
+  allow:
+    domains:
+      - api.openai.com
+      - auth.openai.com
+      - chatgpt.com
+      - api.anthropic.com
+      - claude.ai
+      - platform.claude.com
+      - console.anthropic.com
+      - t3.codes
+      - app.t3.codes
+    ips: []
+    ports: [443]
 ```
+
+Null memory/CPU values omit those limits. `server.port` is the host port; T3
+continues to listen on 3773 internally. `server.advertised_url`, when set, is
+used for pairing instead of the default local URL. Build image paths and version
+strings are validated as arguments, not interpolated into shell code.
+
+Validate resolved profile paths and reject files inside the project or shared
+state mounts. A read-only proxy mount alone does not protect a source file T3
+can edit through another mount. Keep derived runtime snapshots and logs under
+host-managed per-profile directories outside those mounts. Send only the
+required network policy and trusted topology settings to the proxy, not the
+entire profile or runtime secrets. There is still only one editable source.
+
+Track T3/topology settings separately from the mutable allowlist. A changed
+project, network mode, proxy endpoint, state mount, resource setting, or
+management binding requires `make recreate`. Whitelist domains, IPs, and allowed
+ports can change through `make proxy-restart` without T3 recreation. `status`
+reports the active policy digest and whether the saved policy has unapplied
+changes. General `start` never silently claims to have applied such changes;
+it tells the user to run the appropriate proxy restart or full recreation.
 
 Domains match exact hostnames, case-insensitively, normalized for a trailing dot.
 An optional `*.example.com` matches its subdomains, not the apex. Reject a bare
@@ -183,6 +290,64 @@ broad GitHub, npm, PyPI, distro-mirror, browser-CDN, telemetry, or update grants
 CLI updates continue through image rebuilds. Additional remote MCP servers,
 Git remotes, browsing sites, regional APIs, and enterprise identity services
 require explicit host policy edits.
+
+## Proxy-only policy updates
+
+`make proxy-restart PROFILE=<name>` reads and validates the selected full profile,
+checks that its T3/topology settings still match the active sandbox, and compiles
+a candidate network-policy snapshot. Parse-check it using the actual proxy
+software before stopping the existing proxy. Invalid edits leave the existing
+proxy and active policy running unchanged, with an actionable error.
+
+On success, atomically publish the derived snapshot and restart only the
+existing proxy container. Preserve its fixed private address, network
+memberships, published management port, and the running T3 container's ID/PID,
+home, and mounts. Do not remove/recreate networks or run T3 entrypoint hooks.
+Mount the snapshot directory read-only into the proxy so atomic file replacement
+is visible after restart; binding an individual old file inode would not work.
+Each snapshot is generated from a validated immutable read of the host profile.
+
+Verify bridge isolation before the new gateway accepts traffic, reinstall its
+namespace-local egress controls, and wait for proxy plus management readiness.
+If the replacement fails, leave the proxy unavailable and report the failure;
+do not revert to a broader policy automatically. T3 stays running with no
+external route. The external management endpoint is temporarily unavailable
+while the gateway is down. Existing CONNECT tunnels, API streams, and management
+WebSockets disconnect; clients may reconnect/retry after readiness. Local T3 jobs
+continue, although jobs awaiting network traffic can fail or retry. This
+interruption was explicitly accepted by the user.
+
+`proxy-restart` in unrestricted mode reports that there is no proxy and does not
+create one. Full `make restart` still restarts the selected profile's T3 and
+proxy; `make recreate` applies structural profile changes. Commands for one
+profile must not restart another profile's resources.
+
+## Denied-request logs
+
+`make firewall-logs PROFILE=<name>` prints the selected profile's denied proxy
+requests to stdout, using the latest 100 records and following new records by
+default. Ctrl-C ends viewing and leaves services running. Provide a finite
+non-follow option for scripts, without changing the profile. Operational errors
+go to stderr with a nonzero exit code. With restricted mode off, report that
+there is no proxy log rather than enabling the feature.
+
+Use a dedicated normalized denial log rather than grepping arbitrary stderr or
+every HTTP 403: an upstream 403 is not necessarily a policy denial. Each record
+contains UTC timestamp, requested destination hostname or IP, destination port,
+method, policy-denial reason (unlisted domain/IP, forbidden port, or protected
+address), and policy digest. It contains no request path, query, tokens,
+headers, body, or pairing credentials. Persist a bounded/rotated log outside
+T3's mounts so recent denials survive proxy restart; profiles have separate logs.
+Respect backpressure and rotation without blocking traffic indefinitely.
+
+This command exposes application-proxy policy decisions. A direct attempt from
+T3 that fails locally because there is no route never reaches the proxy and
+cannot be reported with its requested domain. Observable proxy-side firewall
+blocks may be logged separately with destination IP/port, but must not be
+presented as domain-aware events. Do not promise an audit of every syscall or
+silently add packet interception inside T3 to populate this log. Document this
+scope next to `firewall-logs`; it is intended for adjusting proxy whitelist
+entries, not as a complete container activity recorder.
 
 ## Client compatibility and dependencies
 
@@ -212,6 +377,7 @@ the bundled T3/provider/tool runtime is ready without dependency download grants
 
 1. Validate settings, rootless Netavark support, policy location/content, image
    identity, and existing resource ownership before changing running resources.
+   Materialize a missing default profile safely before resolving its settings.
 2. Create the per-sandbox networks and start only trusted gateway initialization.
    Use a deterministic T3 private address to configure its fixed relay.
 3. Harden the private bridge in the rootless host-side network namespace, verify
@@ -223,24 +389,34 @@ the bundled T3/provider/tool runtime is ready without dependency download grants
    resources. Never silently switch to unrestricted mode.
 
 Every start/restart revalidates actual membership, interfaces, bridge addresses,
-forwarding, and policy digest before starting a stopped T3 container. Refuse to
-reuse a running container with conflicting mode, binding, or policy settings.
+forwarding, and active policy digest before starting a stopped T3 container.
+Distinguish saved whitelist changes, which need proxy restart, from conflicting
+T3/topology settings, which require recreation.
 Recreating a bridge invalidates earlier hardening; it must be applied again.
 
 Stop T3 before the proxy. Remove only owned per-sandbox containers/networks and
-generated snapshots, preserving home volumes, project files, and live policy.
+generated snapshots, preserving home volumes, project files, live profiles, and
+bounded denial history.
 Switch modes through explicit recreation; it must not leave an unexpected
 gateway running. Existing unrestricted sandboxes require recreation to adopt
 the new host binding or restricted mode. `config`, `status`, `doctor`, logs, and
 smoke commands describe the active mode and its managed resources. Pairing keeps
 the token and accepts an optional reachable advertised URL; `0.0.0.0` is a bind
 address, not a destination to put in a pairing link. Default local pairing can
-continue to advertise `127.0.0.1`; external users supply the host's LAN/DNS URL.
+continue to advertise `127.0.0.1`; external users configure the host's LAN/DNS URL.
+Serialize mutations per profile with a host-side lock, while permitting different
+profiles to start/stop/restart concurrently. Log viewing is not a mutation and
+must not hold that lock while following.
 
 ## Verification and acceptance
 
-- Regression checks cover mode off: no proxy image, network, config, or container
-  required, ordinary outbound access, and host publishing on the selected bind.
+- Regression checks cover mode off: only the unified profile is required, with
+  no proxy image, network, or container required; ordinary outbound access and
+  host publishing on the selected bind remain functional.
+- Profile checks cover automatic default creation, repository-template parity,
+  no overwrite under concurrent initialization, missing nondefault names,
+  strict YAML, path expansion, port persistence/conflicts, and removal of implicit
+  legacy `.env`/environment overrides.
 - Unit/launcher checks cover strict YAML and matching rules, protected-address
   precedence, policy path protection, stale resource detection, fail-closed
   startup, and resource lifecycle without modifying unrelated resources.
@@ -253,6 +429,15 @@ continue to advertise `127.0.0.1`; external users supply the host's LAN/DNS URL.
   non-loopback host address, and independent sandboxes without cross-access.
 - Kill/restart the proxy, recreate the bridge, change policy/mode, and inject
   invalid YAML; every failure must preserve the restriction and existing state.
+- Change a whitelist entry and run `proxy-restart`: confirm the new decision,
+  unchanged T3 container ID/start time and ongoing local job, stable proxy
+  endpoint, and management reconnection. Invalid edits must leave the old policy
+  active; failed restarts must leave T3 isolated. Confirm other profiles remain
+  unaffected and T3 databases/home volumes are independent by default.
+- Generate a known denial and verify `firewall-logs` stdout fields, correct
+  classification, finite/follow modes, profile separation, restart persistence,
+  rotation, and absence of sensitive data. Confirm allowed requests and upstream
+  application 403 responses are not misclassified as policy denials.
 - Verify browser/HTML rendering against local content with internet unavailable,
   including a fresh home and shared state, and explicit browser proxy routing.
 - Verify Codex model traffic through the actual proxy without exposing auth in
