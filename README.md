@@ -20,9 +20,13 @@ than a remote Podman machine or Docker Desktop connection.
 
 ```bash
 sudo apt update
-sudo apt install -y podman uidmap slirp4netns fuse-overlayfs make python3 curl
+sudo apt install -y podman uidmap slirp4netns fuse-overlayfs make python3 python3-yaml curl
 podman info --format '{{.Host.Security.Rootless}}'  # must print true
 ```
+
+The YAML profile loader requires distribution PyYAML (`sudo apt install python3-yaml`).
+Use the distribution Python interpreter, `/usr/bin/python3`, if a pyenv or virtual
+environment shadows `python3`; the loader never installs host dependencies.
 
 Rootless Podman needs subordinate UID and GID ranges in `/etc/subuid` and
 `/etc/subgid`. Distribution packages usually arrange this for ordinary users.

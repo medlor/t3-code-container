@@ -1,0 +1,46 @@
+# Host configuration; values are YAML data, never executed as shell.
+# Paths support only ~ and ${HOME}, referring to the host user's home.
+version: 1
+project:
+  directory: ~/projects/t3-sandbox/default
+  create_if_missing: true
+server:
+  bind_address: 0.0.0.0
+  port: 3773
+  advertised_url: null
+build:
+  ubuntu_image: docker.io/library/ubuntu:rolling
+  node_image: docker.io/library/node:24-bookworm-slim
+  codex_version: latest
+  claude_version: latest
+  t3_version: latest
+resources:
+  memory: 8g # null omits the memory limit
+  cpus: 4 # null omits the CPU limit
+  pids_limit: 2048
+state:
+  share_host_provider_state: true
+  # Newly initialized named profiles default to private T3 state.
+  share_host_t3_state: true
+  t3_directory: ~/.t3
+  codex_directory: ~/.codex
+  claude_directory: ~/.claude
+runtime:
+  env_file: null # Optional secret NAME=value file; never sourced as shell.
+  automatic_healthcheck: false
+network:
+  restricted: false # Optional proxy enforcement; off by default.
+  allow:
+    # Exact provider/product origins, not broad vendor wildcards.
+    domains:
+      - api.openai.com
+      - auth.openai.com
+      - chatgpt.com
+      - api.anthropic.com
+      - claude.ai
+      - platform.claude.com
+      - console.anthropic.com
+      - t3.codes
+      - app.t3.codes
+    ips: []
+    ports: [443]
