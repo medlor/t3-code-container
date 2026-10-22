@@ -178,9 +178,10 @@ collision and let the user edit it. Concurrent starts still handle bind failure.
 Give each profile its own T3 state/home by default. Preserve the option to reuse
 host Codex/Claude state, but do not share `.t3` between default-created profiles:
 multiple T3 servers cannot safely share it. Explicitly configured shared `.t3`
-paths require collision detection before starting parallel profiles. Images may
-be shared deliberately, but default image tags include UID/profile so building
-one profile with different tool versions does not overwrite another's image.
+paths require collision detection before starting parallel profiles. Derive image
+tags from the host UID and profile name; there is no `build.image` override.
+Building one profile with different tool versions does not overwrite another's
+image. Base-image selectors remain configurable.
 
 All build selectors, project path, management binding, resources, state mounts,
 runtime env-file reference, and network policy live in this YAML. Defaults can
@@ -210,7 +211,6 @@ server:
   port: 3773
   advertised_url: null
 build:
-  image: null # derive from host UID and profile name
   ubuntu_image: docker.io/library/ubuntu:rolling
   node_image: docker.io/library/node:24-bookworm-slim
   codex_version: latest
@@ -246,10 +246,20 @@ network:
     ports: [443]
 ```
 
+`state.share_host_state` enables the host state bind mounts: with it set to
+`true`, Codex and Claude use the configured host `.codex` and `.claude`
+directories, including their credentials, settings, and history. With it set to
+`false`, all three applications use this profile's private persistent home.
+`state.share_host_t3_state` is a subordinate switch: it also mounts the host
+`.t3` directory only when both flags are true. Its default is false so concurrent
+profiles do not share a T3 database/server identity. Shared provider-state writes
+affect the host and other profiles sharing those same directories; private state
+still persists across container recreation.
+
 Null memory/CPU values omit those limits. `server.port` is the host port; T3
 continues to listen on 3773 internally. `server.advertised_url`, when set, is
-used for pairing instead of the default local URL. Build image paths and version
-strings are validated as arguments, not interpolated into shell code.
+used for pairing instead of the default local URL. Base-image references and
+version strings are validated as arguments, not interpolated into shell code.
 
 Validate resolved profile paths and reject files inside the project or shared
 state mounts. A read-only proxy mount alone does not protect a source file T3
