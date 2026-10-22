@@ -187,7 +187,9 @@ print(json.dumps({'ipv4':v4,'ipv6':v6,'interfaces':addresses}))'''
 
 
 def check_routes(podman, name, *, external_ip=None):
-    routes = _json(podman.run(['exec', name, 'python3', '-c', ROUTES]))
+    # Workload PATH, cwd and Python environment are writable/untrusted.
+    # Use image-owned Python and exclude project/user imports and startup hooks.
+    routes = _json(podman.run(['exec', name, '/usr/bin/python3', '-I', '-S', '-c', ROUTES]))
     try:
         defaults4 = [item for item in routes['ipv4'] if item['destination'] == '00000000']
         defaults6 = [item for item in routes['ipv6'] if item['destination'] == '0' * 32 and item.get('prefix') == '00']

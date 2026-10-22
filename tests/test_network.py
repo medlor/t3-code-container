@@ -1,6 +1,7 @@
 """Restricted startup: real lifecycle/policy/filesystem with only engine I/O faked."""
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
 import subprocess
 import threading
@@ -8,6 +9,7 @@ import time
 import unittest
 
 from support import ProfileFixture
+from t3_sandbox.network import IsolationError, check_routes
 from t3_sandbox.launcher import Launcher
 from t3_sandbox.paths import ProfileIdentity, profile_paths
 from t3_sandbox.podman import Podman, LABEL_PREFIX
@@ -123,7 +125,7 @@ class NetworkEngine(Podman):
                 else:
                     source = next(m['Source'] for m in self.containers[a[1]]['Mounts'] if m['Destination'] == '/run/t3-policy')
                     output = json.dumps({'digest': json.loads((Path(source) / 'active.json').read_bytes())['digest']})
-            elif 'python3' in a:
+            elif any(arg in ('python3', '/usr/bin/python3') for arg in a):
                 if 'forwarding' in a[-1]:
                     output = json.dumps({'forwarding': [0, 0, 0], 'capabilities': [0, 0, 0, 0, 0], 'nnp': 1})
                 else:
@@ -132,6 +134,94 @@ class NetworkEngine(Podman):
         if check:
             result.check_returncode()
         return result
+
+
+class LocalRouteExec(Podman):
+    """Execute the real probe command; fake only the container and kernel data.
+
+    A real subprocess preserves interpreter selection, import order, working
+    directory and environment behavior. The trusted fixture prefix replaces
+    only reads of the two kernel route tables with a forbidden default route.
+    """
+    ROUTE_TABLE = """import builtins, io
+original_open = builtins.open
+def fixture_open(path, *args, **kwargs):
+ if path == '/proc/net/route':
+  return io.StringIO('Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\\neth0 00000000 0100000A 0003 0 0 0 00000000 0 0 0\\n')
+ if path == '/proc/net/ipv6_route':
+  return io.StringIO('')
+ return original_open(path, *args, **kwargs)
+builtins.open = fixture_open
+"""
+
+    def __init__(self, cwd, environment):
+        self.cwd, self.environment = cwd, environment
+
+    def run(self, args, *, check=True, timeout=30, capture=True):
+        command = list(args[2:])  # Replace only the external podman exec boundary.
+        script_index = command.index('-c') + 1
+        command[script_index] = self.ROUTE_TABLE + command[script_index]
+        return subprocess.run(command, cwd=self.cwd, env=self.environment,
+                              check=check, timeout=timeout, capture_output=capture, text=True)
+
+
+class RouteInspectionTrustTests(unittest.TestCase):
+    def setUp(self):
+        self.f = self.enterContext(ProfileFixture())
+        self.project = self.f.root / 'project'
+        self.project.mkdir()
+        self.environment = dict(os.environ, PATH='/usr/bin:/bin')
+        self.environment.pop('PYTHONPATH', None)
+        self.environment.pop('PYTHONHOME', None)
+        self.marker = self.f.root / 'untrusted-code-ran'
+
+    def assert_real_default_is_rejected(self):
+        with self.assertRaisesRegex(IsolationError, 'default route'):
+            check_routes(LocalRouteExec(self.project, self.environment), 'workload')
+        self.assertFalse(self.marker.exists(), 'Writable code ran during trusted route inspection')
+
+    def malicious_module(self, directory, name):
+        # If imported, lie about the routes and terminate successfully before
+        # the actual probe reads /proc. The host must reject the real default.
+        forged = '{"ipv4":[],"ipv6":[],"interfaces":{}}'
+        (directory / (name + '.py')).write_text(
+            'import os\n'
+            f'open({str(self.marker)!r}, "w").write("untrusted import")\n'
+            f'print({forged!r}, flush=True)\n'
+            'os._exit(0)\n')
+
+    def test_route_check_ignores_writable_path_python_wrapper(self):
+        binary = self.f.root / 'home-bin'
+        binary.mkdir()
+        wrapper = binary / 'python3'
+        wrapper.write_text('#!/bin/sh\nprintf wrapper > "' + str(self.marker) + '"\n'
+                           "printf '%s\\n' '{\"ipv4\":[],\"ipv6\":[],\"interfaces\":{}}'\n")
+        wrapper.chmod(0o755)
+        self.environment['PATH'] = str(binary) + ':/usr/bin:/bin'
+        self.assert_real_default_is_rejected()
+
+    def test_route_check_ignores_project_json_and_socket_modules(self):
+        for module in ('json', 'socket'):
+            with self.subTest(module=module):
+                self.malicious_module(self.project, module)
+                try:
+                    self.assert_real_default_is_rejected()
+                finally:
+                    (self.project / (module + '.py')).unlink()
+                    self.marker.unlink(missing_ok=True)
+
+    def test_route_check_ignores_pythonpath_startup_hooks(self):
+        imports = self.f.root / 'pythonpath'
+        imports.mkdir()
+        self.malicious_module(imports, 'sitecustomize')
+        self.environment['PYTHONPATH'] = str(imports)
+        self.assert_real_default_is_rejected()
+
+    def test_route_check_ignores_spoofed_pythonhome_and_pythonpath(self):
+        self.environment['PYTHONHOME'] = str(self.f.root / 'fake-python-home')
+        self.environment['PYTHONPATH'] = str(self.project)
+        self.malicious_module(self.project, 'json')
+        self.assert_real_default_is_rejected()
 
 
 class RestrictedNetworkTests(unittest.TestCase):
@@ -161,7 +251,7 @@ class RestrictedNetworkTests(unittest.TestCase):
         disable = next(i for i, a in enumerate(self.fake.calls) if 'sysctl' in a and '-w' in a)
         self.assertLess(disable, self.fake.calls.index(t3))
         self.assertEqual(self.fake.bridge_addresses, [])
-        self.assertTrue(any(a[0] == 'exec' and a[1] == self.identity.container and 'python3' in a for a in self.fake.calls))
+        self.assertTrue(any(a[0] == 'exec' and a[1] == self.identity.container and '/usr/bin/python3' in a for a in self.fake.calls))
 
     def test_gateway_has_only_policy_and_logs_and_drops_initial_caps(self):
         self.start()
@@ -221,7 +311,7 @@ class RestrictedNetworkTests(unittest.TestCase):
         run = self.fake.run
         def workload_default(args, **kwargs):
             result = run(args, **kwargs)
-            if args[0] == 'exec' and args[1] == self.identity.container and 'python3' in args:
+            if args[0] == 'exec' and args[1] == self.identity.container and '/usr/bin/python3' in args:
                 result.stdout = json.dumps({'ipv4': [{'destination': '00000000', 'interface': 'eth0'}], 'ipv6': []})
             return result
         self.fake.run = workload_default
@@ -238,7 +328,7 @@ class RestrictedNetworkTests(unittest.TestCase):
         run = self.fake.run
         def workload_default(args, **kwargs):
             result = run(args, **kwargs)
-            if args[0] == 'exec' and args[1] == self.identity.container and 'python3' in args:
+            if args[0] == 'exec' and args[1] == self.identity.container and '/usr/bin/python3' in args:
                 result.stdout = json.dumps({'ipv4': [{'destination': '00000000', 'interface': 'eth0'}], 'ipv6': []})
             return result
         self.fake.run = workload_default
