@@ -149,6 +149,32 @@ class ProfileTests(unittest.TestCase):
             self.assertTrue(p.state.share_host_t3_state)
             self.assertFalse((f.host.home / "my project").exists())
 
+    def test_allowlist_is_normalized_at_profile_boundary(self):
+        with ProfileFixture() as f:
+            profile = f.load("work", {"network": {"allow": {
+                "domains": ["API.OPENAI.COM.", "*.example.com"], "ips": ["8.8.8.9/24"], "ports": [443, 443]}}})
+            self.assertEqual(profile.network.allow.domains, ("api.openai.com", "*.example.com"))
+            self.assertEqual(profile.network.allow.ips, ("8.8.8.0/24",))
+            self.assertEqual(profile.network.allow.ports, (443,))
+
+    def test_profile_rejects_domain_and_ip_policy_injection(self):
+        with ProfileFixture() as f:
+            for field, value in (("domains", "https://example.com"), ("domains", "*"),
+                                 ("domains", "bücher.example"), ("ips", "localhost")):
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    f.load("work", {"network": {"allow": {field: [value]}}})
+
+    def test_comments_and_key_order_do_not_change_policy_digest(self):
+        from t3_sandbox.policy import compile_policy
+        from test_policy import gateway
+        with ProfileFixture() as f:
+            first = decode_profile(b"network: {allow: {domains: [a.example, b.example], ips: [], ports: [443, 80]}}",
+                name="work", source=f.root / "a", host=f.host)
+            second = decode_profile(b"# user comment\nnetwork: {allow: {ports: [80, 443], ips: [], domains: [b.example, a.example]}}",
+                name="work", source=f.root / "b", host=f.host)
+            self.assertEqual(compile_policy(first.network.allow, gateway(), proxy_uid=2001, relay_uid=2002).digest,
+                             compile_policy(second.network.allow, gateway(), proxy_uid=2001, relay_uid=2002).digest)
+
     def test_legacy_environment_cannot_override_yaml(self):
         with ProfileFixture() as f:
             marker = f.root / "executed"

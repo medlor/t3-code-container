@@ -16,7 +16,7 @@ except ImportError as exc:
     raise ImportError("PyYAML is required: sudo apt install python3-yaml (use distribution Python)") from exc
 
 from .paths import HostContext, validate_profile_name
-from .policy import Allowlist
+from .policy import Allowlist, normalize_allowlist
 
 MAX_PROFILE_BYTES = 1024 * 1024
 MAX_MANAGEMENT_PORT = 65535
@@ -231,10 +231,10 @@ def decode_profile(data: bytes, *, name: str, source: Path, host: HostContext) -
                       *(_path(state[key], f"state.{key}", host) for key in ("t3_directory", "codex_directory", "claude_directory"))),
         RuntimeSettings(None if runtime["env_file"] is None else _path(runtime["env_file"], "runtime.env_file", host),
                         _bool(runtime["automatic_healthcheck"], "runtime.automatic_healthcheck")),
-        NetworkSettings(_bool(network["restricted"], "network.restricted"), Allowlist(
+        NetworkSettings(_bool(network["restricted"], "network.restricted"), normalize_allowlist(Allowlist(
             _list(allow["domains"], "network.allow.domains", _string),
             _list(allow["ips"], "network.allow.ips", _string),
-            _list(allow["ports"], "network.allow.ports", _port))))
+            _list(allow["ports"], "network.allow.ports", _port)))))
 
 
 def _read_profile(path: Path) -> bytes:
