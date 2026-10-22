@@ -1,6 +1,6 @@
 # Optional outbound proxy for the T3 sandbox
 
-Status: revised proposal; awaiting user approval. Implementation must follow a separate plan.
+Status: approved by the user on 2026-10-22. Implementation must follow a separate plan.
 
 ## Intent and agreed requirements
 
