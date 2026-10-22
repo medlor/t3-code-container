@@ -15,6 +15,10 @@ uses Codex and also wants a predefined Claude allowlist.
   `network.yaml` to keep in sync.
 - Named profiles support independent parallel sandboxes. All Make commands select
   a profile through `PROFILE=<name>`, defaulting to `default`.
+- Persistent profile homes are ordinary host directories under
+  `~/.local/share/t3-sandbox/<profile>/home`, not Podman named volumes. The
+  `default` profile reuses the original host `.t3` by default, with an independent
+  flag to disable that sharing. Other profiles default to private T3 state.
 - Editing the whitelist and restarting only the proxy must leave the T3 container
   and its jobs running. The user explicitly accepts brief interruption of
   management connections and active outbound streams during that restart.
@@ -175,10 +179,19 @@ port starting at 3773, accounting for existing profiles and host listeners.
 Once saved, never silently change the selected port on startup; report a
 collision and let the user edit it. Concurrent starts still handle bind failure.
 
-Give each profile its own T3 state/home by default. Preserve the option to reuse
-host Codex/Claude state, but do not share `.t3` between default-created profiles:
-multiple T3 servers cannot safely share it. Explicitly configured shared `.t3`
-paths require collision detection before starting parallel profiles. Derive image
+Use `~/.local/share/t3-sandbox/<profile>/home` as an ordinary host directory
+bind-mounted at the container user's home. Its private T3 state lives in
+`home/.t3`. The `default` profile instead overlays the host's original `~/.t3`
+at that location by default. This reuses the actual host state, without copying
+or moving it. Other newly initialized profiles use private T3 state by default.
+Preserve the option to share host Codex/Claude state independently of T3.
+
+The default profile and a host T3 server must not run simultaneously against the
+same `.t3`. Detect conflicting managed containers before startup, respect T3's
+own server lock for host processes, and report a clear conflict rather than
+retrying or deleting lock files. Additional profiles must not share the default
+profile's T3 directory unless explicitly configured, and still must pass the
+single-server check. Derive image
 tags from the host UID and profile name; there is no `build.image` override.
 Building one profile with different tool versions does not overwrite another's
 image. Base-image selectors remain configurable.
@@ -221,8 +234,8 @@ resources:
   cpus: 4
   pids_limit: 2048
 state:
-  share_host_state: true
-  share_host_t3_state: false
+  share_host_provider_state: true
+  share_host_t3_state: true # default profile only; newly initialized named profiles use false
   t3_directory: ~/.t3
   codex_directory: ~/.codex
   claude_directory: ~/.claude
@@ -246,15 +259,28 @@ network:
     ports: [443]
 ```
 
-`state.share_host_state` enables the host state bind mounts: with it set to
-`true`, Codex and Claude use the configured host `.codex` and `.claude`
-directories, including their credentials, settings, and history. With it set to
-`false`, all three applications use this profile's private persistent home.
-`state.share_host_t3_state` is a subordinate switch: it also mounts the host
-`.t3` directory only when both flags are true. Its default is false so concurrent
-profiles do not share a T3 database/server identity. Shared provider-state writes
-affect the host and other profiles sharing those same directories; private state
-still persists across container recreation.
+`state.share_host_provider_state` controls only Codex/Claude: true mounts the
+configured host `.codex` and `.claude` directories, including credentials,
+settings, and history; false keeps them in this profile's persistent host home.
+`state.share_host_t3_state` controls T3 independently: true mounts the configured
+host `t3_directory`; false uses `~/.local/share/t3-sandbox/<profile>/home/.t3`.
+These switches do not gate each other. Initialize `share_host_t3_state` to true
+for `default` and false for all other profiles, and persist the concrete value
+in each file. If omitted, use that same profile-name-dependent default.
+
+Setting `share_host_t3_state: false` disables default-profile reuse of the host
+T3 state. Apply a changed state mount through `make recreate`. Switching the
+flag changes the selected storage, without copying, merging, or deleting either
+directory. Switching it back reveals the existing host state again. Shared-state
+writes affect the host and other users of that directory.
+
+All private profile-home data survives rebuild, restart, recreation, and remove.
+Create directories as the host user and retain matching UID/GID ownership;
+never recursively chown existing state. Mount only `<profile>/home` into T3,
+not the containing profile data directory: derived proxy policy, runtime files,
+and logs are sibling directories outside T3's reach. No named home volumes are
+created for new profiles. Existing legacy volumes are preserved; document an
+explicit offline copy migration instead of silently moving or deleting data.
 
 Null memory/CPU values omit those limits. `server.port` is the host port; T3
 continues to listen on 3773 internally. `server.advertised_url`, when set, is
@@ -405,8 +431,9 @@ T3/topology settings, which require recreation.
 Recreating a bridge invalidates earlier hardening; it must be applied again.
 
 Stop T3 before the proxy. Remove only owned per-sandbox containers/networks and
-generated snapshots, preserving home volumes, project files, live profiles, and
-bounded denial history.
+generated snapshots, preserving host profile homes, original shared host state,
+legacy volumes, project files, live profiles, and bounded denial history. Never
+delete those persistent directories through normal lifecycle commands.
 Switch modes through explicit recreation; it must not leave an unexpected
 gateway running. Existing unrestricted sandboxes require recreation to adopt
 the new host binding or restricted mode. `config`, `status`, `doctor`, logs, and
@@ -443,7 +470,13 @@ must not hold that lock while following.
   unchanged T3 container ID/start time and ongoing local job, stable proxy
   endpoint, and management reconnection. Invalid edits must leave the old policy
   active; failed restarts must leave T3 isolated. Confirm other profiles remain
-  unaffected and T3 databases/home volumes are independent by default.
+  unaffected and named-profile T3 databases/homes are independent by default.
+- Confirm private state remains in ordinary host directories across image
+  rebuilds and container recreation/removal. Confirm `default` mounts the
+  original host `.t3` unless its flag is disabled, other profiles default to
+  private `.t3`, provider-sharing flags are independent, toggling sharing
+  preserves both storage locations, and simultaneous use of one T3 state
+  directory fails clearly without deleting locks or state.
 - Generate a known denial and verify `firewall-logs` stdout fields, correct
   classification, finite/follow modes, profile separation, restart persistence,
   rotation, and absence of sensitive data. Confirm allowed requests and upstream
