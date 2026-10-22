@@ -2,6 +2,13 @@
 PROFILE ?= default
 FOLLOW ?= 1
 TAIL ?= 100
+# Freeze raw input before export: recursive Make variables would evaluate
+# $(shell ...) and consume the dollar syntax intended for the container.
+override PROFILE := $(value PROFILE)
+override PROFILE_DIR := $(value PROFILE_DIR)
+override CMD := $(value CMD)
+override FOLLOW := $(value FOLLOW)
+override TAIL := $(value TAIL)
 export PROFILE PROFILE_DIR CMD FOLLOW TAIL
 .PHONY: help init doctor build rebuild start stop restart recreate remove status logs shell exec pair smoke config
 

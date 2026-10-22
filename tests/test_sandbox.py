@@ -140,6 +140,53 @@ class LauncherTests(unittest.TestCase):
         self.assertFalse(marker.exists())
         self.assertEqual(self.fake.calls(), [])
 
+    def test_make_profile_expression_is_rejected_without_host_evaluation(self):
+        result = self.run_make('start', profile='$(shell printf SELECTOR_EVALUATED >&2)')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Profile name', result.stderr)
+        self.assertNotIn('SELECTOR_EVALUATED', result.stderr)
+        self.assertEqual(self.fake.calls(), [])
+
+    def test_make_exports_never_evaluate_expressions_for_any_input(self):
+        for key in ('PROFILE', 'PROFILE_DIR', 'CMD', 'FOLLOW', 'TAIL'):
+            with self.subTest(key=key):
+                expression = '$(shell printf INPUT_EVALUATED >&2)'
+                result = subprocess.run(['make', '--no-print-directory', 'help', key + '=' + expression],
+                                        cwd=ROOT, env=self.env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn('INPUT_EVALUATED', result.stderr)
+        self.assertEqual(self.fake.calls(), [])
+
+    def test_make_preserves_literal_dollars_in_container_command(self):
+        self.existing()
+        command = 'printf "%s" "$HOME" "$(printf container)" "${VAR:-fallback}" "$$"'
+        result = self.run_make('exec', CMD=command)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.fake.calls()[-1][-3:], ['bash', '-c', command])
+
+    def test_make_uses_environment_defaults_without_expanding_command(self):
+        self.existing()
+        command = 'printf "%s" "$HOME" "$(printf container)"'
+        env = dict(self.env, PROFILE='work', CMD=command, FOLLOW='0', TAIL='9')
+        result = subprocess.run(['make', '--no-print-directory', 'exec'], cwd=ROOT,
+                                env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.fake.calls()[-1][-3:], ['bash', '-c', command])
+        result = subprocess.run(['make', '--no-print-directory', 'logs'], cwd=ROOT,
+                                env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.fake.calls()[-1][:3], ['logs', '--tail', '9'])
+        self.assertNotIn('--follow', self.fake.calls()[-1])
+
+    def test_cli_selectors_override_environment_defaults_as_literal_arguments(self):
+        env = dict(self.env, PROFILE='invalid selector', PROFILE_DIR=str(self.f.root / 'unused'))
+        result = subprocess.run(['bash', str(ROOT / 'scripts/sandbox.sh'), 'config',
+                                 '--profile', 'work', '--profile-dir', str(self.f.profile_dir)],
+                                cwd=ROOT, env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(str(self.f.profile_dir / 'work.yaml'), result.stdout)
+        self.assertEqual(self.fake.calls(), [])
+
     def test_unsafe_build_selector_rejected_before_podman(self):
         self.f.write('work', {'build': {'t3_version': 'latest; touch /tmp/forbidden'}})
         self.assertNotEqual(self.run_make('build').returncode, 0)
