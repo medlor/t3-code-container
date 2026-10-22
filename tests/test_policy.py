@@ -130,20 +130,23 @@ class CompilationTests(unittest.TestCase):
         conf = self.compile().squid_conf
         self.assertEqual([line for line in conf.splitlines() if line.startswith("http_port ")], ["http_port 10.89.1.2:3128"])
         self.assertIn("acl allowed_ports port 443\n", conf)
-        self.assertIn("http_access deny !allowed_ports\n", conf)
-        self.assertIn("http_access deny CONNECT !allowed_ports\n", conf)
+        self.assertIn("http_access deny !allowed_ports tag_port\n", conf)
+        self.assertIn("http_access deny CONNECT !allowed_ports tag_port\n", conf)
         self.assertIn("cache deny all\n", conf)
-        self.assertIn("access_log none\n", conf)
+        self.assertIn("access_log stdio:/run/t3-proxy/decisions.fifo", conf)
+        self.assertNotIn("%ru", conf)
+        self.assertNotIn("%>rp", conf)
+        self.assertIn("%#.253>rd", conf)
         self.assertIn("dns_nameservers 1.1.1.1 10.89.2.1\n", conf)
         access = [line for line in conf.splitlines() if line.startswith("http_access ")]
-        self.assertEqual(access[-1], "http_access deny all")
-        self.assertLess(access.index("http_access deny protected_dst"), access.index("http_access allow t3_client allowed_domains"))
+        self.assertEqual(access[-1], "http_access deny all tag_unlisted")
+        self.assertLess(access.index("http_access deny protected_dst tag_protected"), access.index("http_access allow t3_client allowed_domains"))
         self.assertIn("http_access allow t3_client allowed_ips", access)
 
     def test_explicit_private_and_mapped_allow_entries_never_override_protection(self):
         compiled = self.compile(Allowlist(("private.example",), ("127.0.0.1", "::ffff:127.0.0.1", "93.184.216.34"), (53, 443)))
         conf = compiled.squid_conf
-        self.assertLess(conf.index("http_access deny protected_dst"), conf.index("http_access allow t3_client allowed_ips"))
+        self.assertLess(conf.index("http_access deny protected_dst tag_protected"), conf.index("http_access allow t3_client allowed_ips"))
         for address in ("127.0.0.0/8", "::/3", "93.184.216.34/32", "10.0.0.0/8"):
             self.assertIn(address, conf)
             self.assertIn(address, compiled.nft_conf)

@@ -105,6 +105,12 @@ class Launcher:
         for key, value in selectors.items():
             args += ['--build-arg', key + '=' + value]
         self.podman.run([*args, str(ROOT)], timeout=3600, capture=False)
+        if profile.network.restricted:
+            proxy = ['build', '--format=docker', '--pull=always']
+            if fresh:
+                proxy.append('--no-cache')
+            self.podman.run([*proxy, '-f', str(ROOT / 'proxy/Dockerfile'), '-t', identity.proxy_image,
+                            *self._labels(identity, role='proxy'), str(ROOT)], timeout=3600, capture=False)
 
     def _check_existing(self, profile, paths, resource):
         bindings = resource.get('HostConfig', {}).get('PortBindings', {}).get('3773/tcp', [])

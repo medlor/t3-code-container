@@ -71,7 +71,8 @@ elif a[0] == 'build':
     name = a[a.index('-t') + 1]
     labels = dict(item.split('=', 1) for i, item in enumerate(a) if i and a[i-1] == '--label')
     args = dict(item.split('=', 1) for i, item in enumerate(a) if i and a[i-1] == '--build-arg')
-    labels.update({'io.t3-sandbox.' + key: args['HOST_' + key.upper()] for key in ('uid', 'gid', 'user')})
+    if labels.get('io.t3-sandbox.role') == 't3':
+        labels.update({'io.t3-sandbox.' + key: args['HOST_' + key.upper()] for key in ('uid', 'gid', 'user')})
     state.setdefault('image', {})[name] = {'Id': 'sha256:test-image', 'Config': {'Labels': labels}}
     json.dump(state, open(os.environ['PODMAN_STATE'], 'w'))
 elif a[0] == 'run':

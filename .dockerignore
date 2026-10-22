@@ -2,3 +2,10 @@
 !Dockerfile
 !scripts/
 !scripts/entrypoint.sh
+!scripts/t3_sandbox/
+!scripts/t3_sandbox/__init__.py
+!scripts/t3_sandbox/policy.py
+!scripts/t3_sandbox/denials.py
+!proxy/
+!proxy/Dockerfile
+!proxy/runtime.py

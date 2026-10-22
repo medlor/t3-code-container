@@ -48,6 +48,17 @@ class LauncherTests(unittest.TestCase):
         self.assertNotIn('--volume', run)
         self.assertTrue(any('src=' + str(self.f.host.home / '.local/share/t3-sandbox/work/home') in item for item in run))
 
+    def test_restricted_build_includes_separate_gateway_image(self):
+        self.f.write('work', {'network': {'restricted': True}})
+        result = self.run_make('build')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        builds = [call for call in self.fake.calls() if call[0] == 'build']
+        self.assertEqual(len(builds), 2)
+        proxy = next(call for call in builds if str(ROOT / 'proxy/Dockerfile') in call)
+        self.assertIn(f'localhost/t3-code-proxy:{os.getuid()}-work', proxy)
+        self.assertIn('io.t3-sandbox.role=proxy', proxy)
+        self.assertFalse(any(value.startswith('HOST_UID=') for value in proxy))
+
     def test_exited_container_uses_configured_port(self):
         container = self.existing()
         container['State']['Running'] = False

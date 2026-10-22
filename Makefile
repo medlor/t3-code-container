@@ -15,7 +15,7 @@ export PROFILE PROFILE_DIR CMD FOLLOW TAIL
 help:
 	@echo 'make init       Create persistent YAML profile (PROFILE=default)'
 	@echo 'make doctor     Check rootless Podman and host prerequisites'
-	@echo 'make build      Build the image for the current WSL user'
+	@echo 'make build      Build selected profile images (gateway when restricted)'
 	@echo 'make start      Create/start the selected sandbox'
 	@echo 'make stop       Stop it; keep the container and state'
 	@echo 'make restart    Stop and start the existing container'

@@ -171,12 +171,18 @@ def _digest(value):
 def _squid(allow, gateway, protected):
     lines = [
         f"http_port {gateway.private_ip}:{PROXY_PORT}",
-        "visible_hostname t3-egress", "cache deny all", "cache_store_log none", "access_log none",
-        "pid_filename /run/t3-proxy/squid.pid", "cache_log /run/t3-proxy/cache.log",
-        "coredump_dir /run/t3-proxy", "netdb_filename none", "pinger_enable off",
+        "visible_hostname t3-egress", "cache deny all", "cache_store_log none",
+        "logformat t3decision %ts.%03tu %Ss %err_code %{t3_reason}note %#.253>rd %>rP %#.32rm",
+        "access_log stdio:/run/t3-proxy/decisions.fifo logformat=t3decision buffer-size=0KB on-error=die",
+        "buffered_logs off", "logfile_rotate 0",
+        "pid_filename /run/t3-proxy/squid/squid.pid", "cache_log /dev/null",
+        "coredump_dir /run/t3-proxy/squid", "netdb_filename none", "pinger_enable off",
         "icp_port 0", "htcp_port 0", "forwarded_for delete", "follow_x_forwarded_for deny all",
         "dns_nameservers " + " ".join(gateway.dns_servers),
-        f"acl t3_client src {gateway.t3_ip}/32", "acl CONNECT method CONNECT"]
+        f"acl t3_client src {gateway.t3_ip}/32", "acl CONNECT method CONNECT",
+        "acl tag_protected annotate_transaction t3_reason=protected_address",
+        "acl tag_port annotate_transaction t3_reason=forbidden_port",
+        "acl tag_unlisted annotate_transaction t3_reason=unlisted_destination"]
     for network in (*protected[0], *protected[1]):
         lines.append(f"acl protected_dst dst {network}")
     if allow.ports:
@@ -190,14 +196,14 @@ def _squid(allow, gateway, protected):
         lines.append(f"acl allowed_ips dst {network}")
     # Every destination guard precedes every grant. -n prevents PTR lookups from
     # converting an IP-literal URL into an allowed domain name.
-    lines += ["http_access deny protected_dst"]
+    lines += ["http_access deny protected_dst tag_protected"]
     if allow.ports:
-        lines += ["http_access deny !allowed_ports", "http_access deny CONNECT !allowed_ports"]
+        lines += ["http_access deny !allowed_ports tag_port", "http_access deny CONNECT !allowed_ports tag_port"]
         if allow.domains:
             lines.append("http_access allow t3_client allowed_domains")
         if allow.ips:
             lines.append("http_access allow t3_client allowed_ips")
-    lines.append("http_access deny all")
+    lines.append("http_access deny all tag_unlisted")
     return "\n".join(lines) + "\n"
 
 
