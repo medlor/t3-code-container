@@ -252,7 +252,8 @@ def _port_available(port: int) -> bool:
 
 
 def _allocate_port(profile_dir: Path, host: HostContext) -> int:
-    used = set()
+    # Reserve the fixed default port even if a named profile is initialized first.
+    used = {3773}
     for path in profile_dir.glob("*.yaml"):
         profile = decode_profile(_read_profile(path), name=path.stem, source=path, host=host)
         used.add(profile.server.port)

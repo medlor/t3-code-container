@@ -64,6 +64,15 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual(paths[0].read_bytes(), edited)
             self.assertEqual(list(f.profile_dir.glob("*.yaml")), [paths[0]])
 
+    def test_named_profile_before_default_reserves_default_port(self):
+        with ProfileFixture() as f:
+            with patch("t3_sandbox.profiles._port_available", return_value=True):
+                initialize_profile("work", f.profile_dir, f.host)
+            default = f.load("default")
+            self.assertEqual(default.server.port, 3773)
+            self.assertEqual(f.load("work").server.port, 3774)
+            self.assertNotEqual(f.load("work").server.port, default.server.port)
+
     def test_concurrent_named_profile_ports_are_unique(self):
         with ProfileFixture() as f:
             f.load("default")
@@ -75,12 +84,12 @@ class ProfileTests(unittest.TestCase):
     def test_named_profile_avoids_host_ipv4_listener(self):
         with ProfileFixture() as f, socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
             try:
-                listener.bind(("127.0.0.1", 3773))
+                listener.bind(("127.0.0.1", 3774))
                 listener.listen()
             except OSError:
-                self.skipTest("3773 already in use on this host")
+                self.skipTest("3774 already in use on this host")
             initialize_profile("work", f.profile_dir, f.host)
-            self.assertGreater(f.load("work").server.port, 3773)
+            self.assertGreater(f.load("work").server.port, 3774)
 
     def test_missing_named_profile_does_not_create_file(self):
         with ProfileFixture() as f:
