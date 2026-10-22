@@ -14,6 +14,13 @@ def resource_labels(resource: dict) -> dict:
     return resource.get('Config', {}).get('Labels') or resource.get('labels') or resource.get('Labels') or {}
 
 
+def published_bindings(resource: dict) -> dict:
+    """Podman normalizes an IPv4 wildcard bind to the empty HostIp string."""
+    return {port: [dict(binding, HostIp='0.0.0.0' if binding.get('HostIp') == '' else binding.get('HostIp'))
+                   for binding in bindings]
+            for port, bindings in (resource.get('HostConfig', {}).get('PortBindings') or {}).items() if bindings}
+
+
 def assert_owned(resource: dict, identity: ProfileIdentity) -> None:
     labels = resource_labels(resource)
     expected = {'managed': 'true', 'uid': str(identity.uid), 'profile': identity.name}
@@ -60,8 +67,9 @@ class Podman:
                 raise ValueError(f'Resource has wrong role for profile {identity.name}: expected {expected_role}')
         return resource
 
-    def managed_containers(self) -> list[dict]:
-        result = self.run(['ps', '-a', '--filter', f'label={LABEL_PREFIX}managed=true', '--format', 'json'])
+    def inspect_containers(self, *, managed_only=False) -> list[dict]:
+        filters = ['--filter', f'label={LABEL_PREFIX}managed=true'] if managed_only else []
+        result = self.run(['ps', '-a', *filters, '--format', 'json'])
         try:
             values = json.loads(result.stdout)
         except (ValueError, TypeError) as exc:
@@ -71,6 +79,9 @@ class Podman:
         containers = []
         for item in values:
             resource = self.inspect('container', item['Id'])
-            if resource is not None and resource_labels(resource).get(LABEL_PREFIX + 'managed') == 'true':
+            if resource is not None and (not managed_only or resource_labels(resource).get(LABEL_PREFIX + 'managed') == 'true'):
                 containers.append(resource)
         return containers
+
+    def managed_containers(self) -> list[dict]:
+        return self.inspect_containers(managed_only=True)

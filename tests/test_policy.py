@@ -169,7 +169,21 @@ class CompilationTests(unittest.TestCase):
         drop_index = next(i for i, line in enumerate(output) if "ip daddr @protected_v4 drop" in line)
         global_index = next(i for i, line in enumerate(output) if "meta skuid 2001 tcp dport { 53, 443 } accept" in line)
         self.assertLess(drop_index, global_index)
-        self.assertEqual(len(allows), 5)  # Replies, two resolver exceptions, exact relay, global TCP.
+        self.assertEqual(len(allows), 6)  # Replies, resolvers, relay, local publication, global TCP.
+
+    def test_rootless_published_management_is_only_supervisor_local_ipv4_loopback(self):
+        conf = policy.compile_policy(Allowlist((), (), ()), gateway(), proxy_uid=2001, relay_uid=2002,
+            management_ips=('10.89.2.7', '10.89.1.2')).nft_conf
+        output = conf.split('chain output {', 1)[1].split('\n    }', 1)[0]
+        exception = 'meta skuid 2003 meta nfproto ipv4 oifname "lo" ip daddr { 10.89.1.2, 10.89.2.7 } tcp dport 3773 accept'
+        self.assertIn(exception, output)
+        self.assertLess(output.index(exception), output.index('ip daddr @protected_v4 drop'))
+        loopback = [line.strip() for line in output.splitlines() if 'oifname "lo"' in line]
+        self.assertEqual(loopback, [exception])
+        ingress = conf.split('chain input {', 1)[1].split('\n    }', 1)[0]
+        inbound = 'meta nfproto ipv4 iifname "lo" ip daddr { 10.89.1.2, 10.89.2.7 } tcp dport 3773 accept'
+        self.assertIn(inbound, ingress)
+        self.assertLess(ingress.index(inbound), ingress.index('ip saddr 10.89.1.0/24 drop'))
 
     def test_nft_default_drop_and_private_input_boundaries(self):
         conf = self.compile().nft_conf
@@ -177,11 +191,17 @@ class CompilationTests(unittest.TestCase):
         for chain in ("input", "output", "forward"):
             self.assertIn(f"type filter hook {chain} priority 0; policy drop;", conf)
         self.assertIn("ip saddr 10.89.1.3 ip daddr 10.89.1.2 tcp dport 3128 accept", conf)
-        self.assertLess(conf.index("ip saddr 10.89.1.0/24 drop"), conf.index("tcp dport 3773 accept"))
+        self.assertLess(conf.index("ip saddr 10.89.1.0/24 drop"), conf.index("        tcp dport 3773 accept"))
         self.assertNotIn("flush ruleset", conf)
 
+    def test_management_destinations_must_be_exact_ipv4_unicast_addresses(self):
+        for addresses in (('127.0.0.1',), ('0.0.0.0',), ('::1',), ('224.0.0.1',), ('10.89.0.0/24',), ['127.0.0.1']):
+            with self.subTest(addresses=addresses), self.assertRaises(ValueError):
+                policy.compile_policy(Allowlist((), (), ()), gateway(), proxy_uid=2001, relay_uid=2002,
+                                      management_ips=addresses)
+
     def test_uids_must_be_distinct_nonroot_integers(self):
-        for proxy_uid, relay_uid in ((0, 2002), (2001, 0), (True, 2002), (2001, 2001), (-1, 2002), (2**32, 2002)):
+        for proxy_uid, relay_uid in ((2003, 2002), (2001, 2003), (0, 2002), (2001, 0), (True, 2002), (2001, 2001), (-1, 2002), (2**32, 2002)):
             with self.subTest(uids=(proxy_uid, relay_uid)), self.assertRaises(ValueError):
                 policy.compile_policy(Allowlist((), (), (443,)), gateway(), proxy_uid=proxy_uid, relay_uid=relay_uid)
 

@@ -1,23 +1,25 @@
 """Trusted PID1 for the isolated egress gateway; no host namespace operations."""
 import argparse
 import ctypes
+import fcntl
 import ipaddress
 import json
 import os
 from pathlib import Path
 import select
 import signal
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
 import time
 
 from t3_sandbox.denials import MAX_DECISION_BYTES, append_denial, parse_denial
-from t3_sandbox.policy import MAX_SNAPSHOT_BYTES, CompiledPolicy, compile_policy, decode_snapshot
+from t3_sandbox.policy import MAX_SNAPSHOT_BYTES, SUPERVISOR_UID, CompiledPolicy, compile_policy, decode_snapshot
 
 PROXY_UID = 2001
 RELAY_UID = 2002
-SUPERVISOR_UID = 2003
 RUN = Path('/run/t3-proxy')
 READY = RUN / 'ready.json'
 _LIBC = ctypes.CDLL(None, use_errno=True)
@@ -62,10 +64,27 @@ def _child(uid):
         os._exit(1)
 
 
-def validate_snapshot(path: Path) -> CompiledPolicy:
+def local_ipv4_addresses() -> tuple[str, ...]:
+    """Discover actual non-loopback addresses in this trusted network namespace."""
+    addresses = set()
+    for _, name in socket.if_nameindex():
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as connection:
+                data = fcntl.ioctl(connection.fileno(), 0x8915, struct.pack('256s', name.encode()))
+                address = socket.inet_ntoa(data[20:24])
+        except OSError:
+            continue  # An interface without an IPv4 address is not a destination.
+        parsed = ipaddress.ip_address(address)
+        if not parsed.is_loopback and not parsed.is_unspecified and not parsed.is_multicast:
+            addresses.add(str(parsed))
+    return tuple(sorted(addresses))
+
+
+def validate_snapshot(path: Path, *, management_ips=()) -> CompiledPolicy:
     with path.open('rb') as stream:
         allow, gateway = decode_snapshot(stream.read(MAX_SNAPSHOT_BYTES + 1))
-    compiled = compile_policy(allow, gateway, proxy_uid=PROXY_UID, relay_uid=RELAY_UID)
+    compiled = compile_policy(allow, gateway, proxy_uid=PROXY_UID, relay_uid=RELAY_UID,
+                              management_ips=management_ips)
     # Parsing never installs nft rules or starts Squid/relay listeners. nft's
     # --check requires NET_ADMIN and is performed only by privileged serve init.
     with tempfile.TemporaryDirectory(prefix='t3-proxy-validate-') as temporary:
@@ -197,9 +216,12 @@ def serve(snapshot: Path, logs: Path) -> int:
         return 1
     try:
         READY.unlink(missing_ok=True)
-        compiled = validate_snapshot(snapshot)
+        local = local_ipv4_addresses()
+        compiled = validate_snapshot(snapshot, management_ips=local)
         with snapshot.open('rb') as stream:
             _, gateway = decode_snapshot(stream.read(MAX_SNAPSHOT_BYTES + 1))
+        if gateway.private_ip not in local:
+            raise ValueError('Private gateway address is not assigned locally')
         initialize(compiled)
         if not logs.is_dir() or logs.stat().st_uid != SUPERVISOR_UID or logs.stat().st_mode & 0o077:
             raise ValueError('Dedicated log directory must be supervisor-owned with mode 0700')

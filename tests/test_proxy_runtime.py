@@ -42,6 +42,20 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(len(compiled.digest), 64)
         self.assertFalse((self.root / 'ready.json').exists())
 
+    def test_serve_scopes_management_to_trusted_discovered_local_ipv4_addresses(self):
+        compiled = []
+        def capture(value):
+            compiled.append(value)
+            raise RuntimeError('stop before listeners')
+        with patch.object(self.runtime.os, 'getpid', return_value=1), \
+             patch.object(self.runtime, 'local_ipv4_addresses', create=True, return_value=('10.89.1.2', '10.89.2.7')), \
+             patch.object(self.runtime.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)), \
+             patch.object(self.runtime, 'initialize', side_effect=capture), \
+             patch.object(self.runtime, 'READY', self.root / 'ready.json'):
+            self.assertEqual(self.runtime.serve(self.snapshot, self.root / 'logs'), 1)
+        self.assertEqual(len(compiled), 1)
+        self.assertIn('ip daddr { 10.89.1.2, 10.89.2.7 } tcp dport 3773 accept', compiled[0].nft_conf)
+
     def test_missing_malformed_and_oversized_snapshot_fail(self):
         for data in (b'{}', b'[]', b'\xff', b'x' * (1024 * 1024 + 1)):
             self.snapshot.write_bytes(data)
@@ -61,6 +75,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_firewall_failure_prevents_listener_start(self):
         with patch.object(self.runtime.os, 'getpid', return_value=1), \
+             patch.object(self.runtime, 'local_ipv4_addresses', return_value=('10.89.1.2', '10.89.2.7')), \
              patch.object(self.runtime, 'validate_snapshot', return_value=policy.compile_policy(
                  *policy.decode_snapshot(self.snapshot.read_bytes()), proxy_uid=2001, relay_uid=2002)), \
              patch.object(self.runtime, 'initialize', side_effect=RuntimeError('nft failed')), \

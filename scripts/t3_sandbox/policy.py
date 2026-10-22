@@ -15,6 +15,7 @@ import re
 
 PROXY_PORT = 3128
 T3_PORT = 3773
+SUPERVISOR_UID = 2003
 MAX_SNAPSHOT_BYTES = 1024 * 1024
 
 
@@ -207,7 +208,8 @@ def _squid(allow, gateway, protected):
     return "\n".join(lines) + "\n"
 
 
-def _nft(allow, gateway, protected, proxy_uid, relay_uid):
+def _nft(allow, gateway, protected, proxy_uid, relay_uid, management_ips):
+    local = "{ " + ", ".join(management_ips) + " }"
     lines = ["table inet t3_egress {"]
     for version, networks in zip((4, 6), protected):
         lines += [f"    set protected_v{version} {{", f"        type ipv{version}_addr; flags interval;",
@@ -215,6 +217,9 @@ def _nft(allow, gateway, protected, proxy_uid, relay_uid):
     lines += ["    chain input {", "        type filter hook input priority 0; policy drop;",
               "        ct state invalid drop", "        ct state established,related accept",
               f"        ip saddr {gateway.t3_ip} ip daddr {gateway.private_ip} tcp dport {PROXY_PORT} accept",
+              # Rootless Podman's host-owned publication helper self-connects in
+              # this namespace, using either current local IPv4 address.
+              f'        meta nfproto ipv4 iifname "lo" ip daddr {local} tcp dport {T3_PORT} accept',
               f"        ip saddr {gateway.private_cidr} drop",
               # The host's publication binds host_port/bind_address; gateway's
               # fixed relay listens on 3773. Never expose it to the T3 subnet.
@@ -228,6 +233,7 @@ def _nft(allow, gateway, protected, proxy_uid, relay_uid):
         family = "ip" if _address(resolver).version == 4 else "ip6"
         lines.append(f"        meta skuid {proxy_uid} {family} daddr {resolver} udp dport 53 accept")
     lines += [f"        meta skuid {relay_uid} ip daddr {gateway.t3_ip} tcp dport {T3_PORT} accept",
+              f'        meta skuid {SUPERVISOR_UID} meta nfproto ipv4 oifname "lo" ip daddr {local} tcp dport {T3_PORT} accept',
               "        ip daddr @protected_v4 drop", "        ip6 daddr @protected_v6 drop"]
     if allow.ports and (allow.domains or allow.ips):
         ports = "{ " + ", ".join(map(str, sorted(allow.ports))) + " }"
@@ -236,17 +242,24 @@ def _nft(allow, gateway, protected, proxy_uid, relay_uid):
     return "\n".join(lines) + "\n"
 
 
-def compile_policy(value: Allowlist, gateway: GatewayConfig, *, proxy_uid: int, relay_uid: int) -> CompiledPolicy:
+def compile_policy(value: Allowlist, gateway: GatewayConfig, *, proxy_uid: int, relay_uid: int,
+                   management_ips: tuple[str, ...] = ()) -> CompiledPolicy:
     """Generate standalone policy for IPv4 external topology and DNS resolvers.
 
     IPv6 operational topology is rejected until neighbor discovery has a reviewed
     policy; IPv6 allowlist syntax and protected-destination guards are retained.
     """
     allow, gateway = normalize_allowlist(value), _gateway(gateway)
-    if any(type(uid) is not int or not 1 <= uid < 2**32 - 1 for uid in (proxy_uid, relay_uid)) or proxy_uid == relay_uid:
-        raise ValueError("Proxy and relay UIDs must be distinct nonroot numeric identities")
+    if any(type(uid) is not int or not 1 <= uid < 2**32 - 1 for uid in (proxy_uid, relay_uid)) or proxy_uid == relay_uid or SUPERVISOR_UID in (proxy_uid, relay_uid):
+        raise ValueError("Proxy and relay UIDs must be distinct nonroot identities, separate from the supervisor")
+    local = tuple(_address(item) for item in _tuple(management_ips, 'management_ips'))
+    if any(item.version != 4 or item.is_loopback or item.is_unspecified or item.is_multicast for item in local):
+        raise ValueError('Management destinations must be exact non-loopback IPv4 unicast addresses')
+    # Offline validation uses the known private endpoint. Serve supplies trusted
+    # live interface addresses, never an additional user-supplied snapshot field.
+    local = tuple(sorted(set(map(str, local)))) or (gateway.private_ip,)
     protected = _protected(gateway)
-    return CompiledPolicy(_digest(allow), _squid(allow, gateway, protected), _nft(allow, gateway, protected, proxy_uid, relay_uid))
+    return CompiledPolicy(_digest(allow), _squid(allow, gateway, protected), _nft(allow, gateway, protected, proxy_uid, relay_uid, local))
 
 
 def encode_snapshot(value: Allowlist, gateway: GatewayConfig) -> bytes:

@@ -163,9 +163,29 @@ groups are not passed through.
 Unrestricted networking is the default (`network.restricted: false`) and needs
 only the T3 image/container. It uses
 `slirp4netns:allow_host_loopback=false`. This allows outbound internet and can
-reach LAN or host services; it is not an egress firewall. Restricted startup
-currently fails with an explicit “not implemented” message while the proxy
-implementation is developed. It never falls back to unrestricted networking.
+reach LAN or host services; it is not an egress firewall. To select restricted mode, set `network.restricted: true` in the profile YAML,
+configure `network.allow`, then run `make build PROFILE=work` and
+`make start PROFILE=work`. Switching modes requires `make recreate PROFILE=work`.
+Restricted mode requires local rootless Podman with Netavark; Podman 4.9.3 /
+Netavark 1.4.0 is the verified baseline. Unsupported controls fail closed.
+
+Restricted T3 joins only an internal network with DNS disabled and no default
+route. A separate gateway publishes the management port, proxies permitted
+outbound traffic on private port 3128, and has forwarding disabled. The launcher
+disables host-side private bridge IPv6, rejects an IPv4-addressed bridge, verifies
+live routes with a trusted disposable probe, and verifies gateway readiness
+before starting T3. The proxy port is never published. Removing proxy variables
+does not grant T3 direct internet, host or LAN access.
+
+Runtime policy and topology snapshots live outside T3 mounts in the profile's
+`runtime` directory; gateway denial logs live in its separate `logs` directory.
+The gateway receives only its read-only policy directory and its logs. Start
+checks actual image IDs, mounts, ports and network memberships before reuse.
+Topology changes require `make recreate`; allowlist-only changes are reported
+with a `make proxy-restart` diagnostic (the command arrives in the next lifecycle
+step). Until then, `make recreate` applies policy edits with a T3 interruption.
+Stop shuts down T3 before the gateway. Remove preserves persistent homes and logs.
+Restricted mode never falls back to unrestricted networking.
 The restricted-mode compiler currently supports only IPv4 external subnets and
 DNS resolvers, and rejects IPv6 or mixed operational topology. IPv6-only
 resolvers and upstream services are unavailable in this version. IPv6

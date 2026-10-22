@@ -203,11 +203,11 @@ class LauncherTests(unittest.TestCase):
         self.assertNotEqual(self.run_make('build').returncode, 0)
         self.assertEqual(self.fake.calls(), [])
 
-    def test_restricted_startup_reports_unsupported_without_running_t3(self):
+    def test_restricted_startup_requires_owned_images_without_running_t3(self):
         self.f.write('work', {'network': {'restricted': True}})
         result = self.run_make('start')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('not implemented', result.stderr)
+        self.assertIn('make build', result.stderr)
         self.assertFalse(any(call[0] in ('run', 'start') for call in self.fake.calls()))
 
     def test_storage_validation_precedes_any_container_start(self):
@@ -261,6 +261,21 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(args[args.index('--pids-limit') + 1], '512')
         self.assertEqual(args[args.index('--env-file') + 1], str(env_file))
         self.assertNotIn('runtime-secret', result.stdout + result.stderr)
+
+    def test_reuse_accepts_podman_empty_ipv4_wildcard_binding(self):
+        container = self.existing()
+        container['HostConfig']['PortBindings']['3773/tcp'][0]['HostIp'] = ''
+        self.fake.save()
+        result = self.run_make('start')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_reuse_rejects_actual_image_identity_change(self):
+        container = self.existing()
+        container['Image'] = 'sha256:unexpected'
+        self.fake.save()
+        result = self.run_make('start')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('recreate', result.stderr)
 
     def test_unowned_image_is_rejected(self):
         self.assertEqual(self.run_make('build').returncode, 0)
