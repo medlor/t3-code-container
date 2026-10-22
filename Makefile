@@ -1,8 +1,12 @@
 .DEFAULT_GOAL := help
+PROFILE ?= default
+FOLLOW ?= 1
+TAIL ?= 100
+export PROFILE PROFILE_DIR CMD FOLLOW TAIL
 .PHONY: help init doctor build rebuild start stop restart recreate remove status logs shell exec pair smoke config
 
 help:
-	@echo 'make init       Create .env from .env.example'
+	@echo 'make init       Create persistent YAML profile (PROFILE=default)'
 	@echo 'make doctor     Check rootless Podman and host prerequisites'
 	@echo 'make build      Build the image for the current WSL user'
 	@echo 'make start      Create/start the selected sandbox'
