@@ -4,12 +4,14 @@ Only Squid's explicit local access-denial marker plus our decision annotation
 produce a record. HTTP status codes alone never establish a policy denial.
 """
 from dataclasses import asdict, dataclass
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 import ipaddress
 import json
 import os
 from pathlib import Path
 import re
+import stat
 import time
 from typing import Iterator
 from urllib.parse import unquote_to_bytes
@@ -149,15 +151,52 @@ def _read_records(stream, state):
     return offset, discarding
 
 
+@contextmanager
+def _log_snapshot(directory):
+    """Pin a coherent retained-inode order before reading or emitting records."""
+    paths = [directory / ('denials.jsonl' + ('.' + str(index) if index else ''))
+             for index in range(RETAINED_LOGS, -1, -1)]
+    while True:
+        with ExitStack() as files:
+            streams, captured = [], []
+            for path in paths:
+                try:
+                    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                except FileNotFoundError:
+                    captured.append(None)
+                    continue
+                stream = files.enter_context(os.fdopen(descriptor, 'rb'))
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode):
+                    raise ValueError('Denial log must be a regular file')
+                inode = info.st_dev, info.st_ino
+                captured.append(inode)
+                streams.append((inode, stream))
+            observed = []
+            for path in paths:
+                try:
+                    info = path.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    observed.append(None)
+                else:
+                    observed.append((info.st_dev, info.st_ino))
+            if captured == observed:
+                # Descriptors retain this order even if paths rotate afterwards.
+                yield streams
+                return
+        # A rotation crossed the scan. Close all descriptors and retry without
+        # committing offsets or a partial tail from the inconsistent snapshot.
+        time.sleep(0.01)
+
+
 def read_denials(directory: Path, *, tail: int = 100, follow: bool = True) -> Iterator[DenialRecord]:
     """Tail canonical records across retention; follow inode renames and restart.
 
-    Retain only requested tail records, at most four inode offsets, and one
-    bounded line. No mutation lock is held; files are closed before sleeping.
+    Retain only requested tail records, at most four pinned files/inode offsets,
+    and one bounded line. No mutation lock is held; files are closed before sleeping.
     Invalid/incomplete records never enter JSONL output.
     """
     from collections import deque
-    import stat
 
     if type(tail) is not int or tail < 0:
         raise ValueError('TAIL must be nonnegative')
@@ -168,17 +207,8 @@ def read_denials(directory: Path, *, tail: int = 100, follow: bool = True) -> It
     recent = deque(maxlen=tail)
     while True:
         seen = set()
-        for index in range(RETAINED_LOGS, -1, -1):
-            path = directory / ('denials.jsonl' + ('.' + str(index) if index else ''))
-            try:
-                descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-            except FileNotFoundError:
-                continue  # Rotation/restart may briefly remove a filename.
-            with os.fdopen(descriptor, 'rb') as stream:
-                info = os.fstat(stream.fileno())
-                if not stat.S_ISREG(info.st_mode):
-                    raise ValueError('Denial log must be a regular file')
-                inode = info.st_dev, info.st_ino
+        with _log_snapshot(directory) as streams:
+            for inode, stream in streams:
                 if inode in seen:
                     continue
                 seen.add(inode)

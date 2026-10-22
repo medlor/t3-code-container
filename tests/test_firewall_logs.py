@@ -45,6 +45,62 @@ class DenialReaderTests(unittest.TestCase):
         self.assertEqual(list(self.read(tail=3, follow=False)), [record(6), record(7), record(8)])
         self.assertEqual(list(self.read(tail=0, follow=False)), [])
 
+    def rotate_between_retained_and_active_opens(self, *, active_record=3):
+        """Rotate real files at the vulnerable open boundary, exactly once."""
+        open_file = os.open
+        retained_opened = rotated = False
+        def rotating_open(path, *args, **kwargs):
+            nonlocal retained_opened, rotated
+            path = Path(path)
+            if path == self.directory / 'denials.jsonl.1':
+                retained_opened = True
+            if path == self.directory / 'denials.jsonl' and retained_opened and not rotated:
+                rotated = True
+                (self.directory / 'denials.jsonl.1').replace(self.directory / 'denials.jsonl.2')
+                path.replace(self.directory / 'denials.jsonl.1')
+                self.write('', [active_record])
+            return open_file(path, *args, **kwargs)
+        return patch.object(denials.os, 'open', rotating_open)
+
+    def test_finite_tail_reconciles_rotation_between_file_opens(self):
+        for tail, expected in ((100, [1, 2, 3]), (2, [2, 3]), (1, [3]), (0, [])):
+            with self.subTest(tail=tail):
+                for path in self.directory.iterdir():
+                    path.unlink()
+                self.write('.1', [1])
+                self.write('', [2])
+                with self.rotate_between_retained_and_active_opens():
+                    actual = list(self.read(tail=tail, follow=False))
+                self.assertEqual(actual, [record(n) for n in expected])
+
+    def test_follow_tail_reconciles_rotation_without_replaying_records(self):
+        self.write('.1', [1])
+        active = self.write('', [2])
+        reader = self.read(tail=2)
+        self.addCleanup(reader.close)
+        with self.rotate_between_retained_and_active_opens():
+            self.assertEqual([next(reader), next(reader)], [record(2), record(3)])
+        def append_next(_):
+            with active.open('a') as stream:
+                stream.write(record(4).json_line())
+        with patch.object(denials.time, 'sleep', append_next):
+            self.assertEqual(next(reader), record(4))
+        with patch.object(denials.time, 'sleep', side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            next(reader)
+
+    def test_follow_poll_reconciles_rotation_before_emitting_newer_inode(self):
+        self.write('.1', [1])
+        active = self.write('', [2])
+        reader = self.read(tail=1)
+        self.addCleanup(reader.close)
+        self.assertEqual(next(reader), record(2))
+        with active.open('a') as stream:
+            stream.write(record(3).json_line())
+        with self.rotate_between_retained_and_active_opens(active_record=4):
+            self.assertEqual([next(reader), next(reader)], [record(3), record(4)])
+        with patch.object(denials.time, 'sleep', side_effect=KeyboardInterrupt), self.assertRaises(KeyboardInterrupt):
+            next(reader)
+
     def test_firewall_logs_follow_rotation_and_restart(self):
         active = self.write('', [1])
         reader = self.read(tail=1, follow=True)
