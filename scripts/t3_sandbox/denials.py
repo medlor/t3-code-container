@@ -10,6 +10,8 @@ import json
 import os
 from pathlib import Path
 import re
+import time
+from typing import Iterator
 from urllib.parse import unquote_to_bytes
 
 from .policy import GatewayConfig, is_protected_address
@@ -112,3 +114,91 @@ def append_denial(path: Path, record: DenialRecord) -> None:
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, 'wb') as stream:
         stream.write(data)
+
+
+def _read_records(stream, state):
+    """Consume complete bounded lines; leave an incomplete write for next poll."""
+    offset, discarding = state
+    if os.fstat(stream.fileno()).st_size < offset:
+        offset, discarding = 0, False
+    stream.seek(offset)
+    while True:
+        start = stream.tell()
+        line = stream.readline(MAX_DECISION_BYTES + 1)
+        if not line:
+            break
+        if not line.endswith(b'\n'):
+            if len(line) > MAX_DECISION_BYTES or discarding:
+                discarding = True
+                offset = stream.tell()
+                continue
+            stream.seek(start)
+            break
+        offset = stream.tell()
+        if discarding or len(line) > MAX_DECISION_BYTES:
+            discarding = False
+            continue
+        try:
+            value = json.loads(line)
+            if type(value) is not dict or not all(isinstance(value.get(key), str) for key in
+                    ('timestamp', 'destination', 'method', 'reason', 'policy_digest')):
+                continue
+            yield DenialRecord(**value), (offset, discarding)
+        except (ValueError, TypeError, UnicodeError):
+            continue
+    return offset, discarding
+
+
+def read_denials(directory: Path, *, tail: int = 100, follow: bool = True) -> Iterator[DenialRecord]:
+    """Tail canonical records across retention; follow inode renames and restart.
+
+    Retain only requested tail records, at most four inode offsets, and one
+    bounded line. No mutation lock is held; files are closed before sleeping.
+    Invalid/incomplete records never enter JSONL output.
+    """
+    from collections import deque
+    import stat
+
+    if type(tail) is not int or tail < 0:
+        raise ValueError('TAIL must be nonnegative')
+    if directory.is_symlink() or not directory.is_dir():
+        raise ValueError('Denial log directory is unavailable')
+    positions = {}
+    initial = True
+    recent = deque(maxlen=tail)
+    while True:
+        seen = set()
+        for index in range(RETAINED_LOGS, -1, -1):
+            path = directory / ('denials.jsonl' + ('.' + str(index) if index else ''))
+            try:
+                descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            except FileNotFoundError:
+                continue  # Rotation/restart may briefly remove a filename.
+            with os.fdopen(descriptor, 'rb') as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode):
+                    raise ValueError('Denial log must be a regular file')
+                inode = info.st_dev, info.st_ino
+                if inode in seen:
+                    continue
+                seen.add(inode)
+                records = _read_records(stream, positions.get(inode, (0, False)))
+                while True:
+                    try:
+                        record, state = next(records)
+                    except StopIteration as end:
+                        positions[inode] = end.value
+                        break
+                    positions[inode] = state
+                    if initial:
+                        recent.append(record)
+                    else:
+                        yield record
+        positions = {inode: state for inode, state in positions.items() if inode in seen}
+        if initial:
+            initial = False
+            yield from recent
+            recent.clear()
+            if not follow:
+                return
+        time.sleep(0.1)

@@ -6,6 +6,10 @@ from pathlib import Path
 import pwd
 import subprocess
 import fcntl
+import io
+from contextlib import redirect_stdout
+from copy import deepcopy
+from unittest.mock import patch
 import time
 import unittest
 
@@ -340,10 +344,191 @@ class LauncherTests(unittest.TestCase):
         self.assertFalse(list(project.glob('.t3-permission-check.*')))
         self.assertEqual(keep.read_text(), 'untouched')
 
+    def test_make_firewall_logs_recovers_invalid_yaml_and_preserves_jsonl_stdout(self):
+        from t3_sandbox.denials import DenialRecord
+        logs = self.f.host.home / '.local/share/t3-sandbox/work/logs'
+        logs.mkdir(mode=0o700, parents=True)
+        line = DenialRecord('2026-10-22T12:00:00.000Z', 'blocked.example', 443,
+                            'CONNECT', 'unlisted_destination', 'a' * 64).json_line()
+        (logs / 'denials.jsonl').write_text(line)
+        self.fake.add_container(f't3-sandbox-{os.getuid()}-work-proxy', uid=str(os.getuid()), role='proxy',
+            mounts=[{'Type': 'bind', 'Source': str(logs), 'Destination': '/var/log/t3-proxy', 'RW': True}])
+        self.f.write('work', {'network': {'allow': {'ports': ['bad']}}})
+        result = self.run_make('firewall-logs', FOLLOW=0, TAIL=1)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, line)
+        self.assertEqual(result.stderr, '')
+        failed = self.run_make('firewall-logs', profile='other', FOLLOW=0)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(failed.stdout, '')
+        self.assertIn('gateway', failed.stderr)
+
+    def test_make_proxy_restart_off_does_not_create_gateway(self):
+        result = self.run_make('proxy-restart')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.fake.created_proxy_resources())
+
     def test_build_selector_change_does_not_require_recreate(self):
         self.existing()
         self.f.write('work', {'build': {'t3_version': '0.1.0'}})
         self.assertEqual(self.run_make('start').returncode, 0)
+
+
+class ProxyRestartTests(unittest.TestCase):
+    def setUp(self):
+        from test_network import NetworkEngine
+        from t3_sandbox.launcher import Launcher
+        from t3_sandbox.paths import ProfileIdentity, profile_paths
+        self.f = self.enterContext(ProfileFixture())
+        self.f.load('work', {'server': {'port': 3774}, 'network': {'restricted': True}})
+        self.identity = ProfileIdentity('work', self.f.host.uid)
+        self.paths = profile_paths(self.identity, self.f.profile_dir, self.f.host)
+        self.fake = NetworkEngine(self.identity, self.f.host)
+        self.launcher = Launcher(self.fake, self.f.host, self.f.profile_dir)
+        self.launcher.dispatch('start', 'work')
+        self.before = deepcopy(self.fake.containers[self.identity.container])
+        self.old = (self.paths.runtime / 'policy/active.json').read_bytes()
+        self.fake.calls.clear()
+        self.run_engine = self.fake.run
+        self.validation_error = self.start_error = False
+        self.validated = None
+        self.restart_snapshot = None
+        def engine(args, **kwargs):
+            if args[0] == 'image' and args[-1].startswith('sha256:'):
+                args = [*args[:-1], next(name for name, image in self.fake.images.items() if image['Id'] == args[-1])]
+            if args[0] == 'run' and 'validate' in args:
+                self.fake.calls.append(list(args))
+                mount = next(args[i+1] for i, arg in enumerate(args) if arg == '--mount')
+                source = next(field[4:] for field in mount.split(',') if field.startswith('src='))
+                self.validated = (Path(source) / 'active.json').read_bytes()
+                if self.validation_error:
+                    raise subprocess.CalledProcessError(1, args)
+                return subprocess.CompletedProcess(args, 0, json.dumps({'digest': json.loads(self.validated)['digest']}), '')
+            if args[0] == 'start' and args[-1] == self.identity.proxy:
+                self.restart_snapshot = (self.paths.runtime / 'policy/active.json').read_bytes()
+                if self.start_error:
+                    raise subprocess.CalledProcessError(1, args)
+            return self.run_engine(args, **kwargs)
+        self.fake.run = engine
+        def host_curl(args, **kwargs):
+            self.assertEqual(args[-1], 'http://127.0.0.1:3774/')
+            return subprocess.CompletedProcess(args, 0, '', '')
+        self.enterContext(patch('t3_sandbox.launcher.subprocess.run', host_curl))
+
+    def edit_policy(self):
+        self.f.write('work', {'network': {'allow': {'domains': ['api.openai.com', 'new.example']}}})
+
+    def assert_t3_untouched(self):
+        self.assertEqual(self.fake.containers[self.identity.container], self.before)
+        self.assertFalse(any(a[0] in ('start', 'stop', 'restart', 'rm') and a[-1] == self.identity.container for a in self.fake.calls))
+        self.assertFalse(any(a[:2] in (['network', 'create'], ['network', 'rm']) for a in self.fake.calls))
+
+    def test_proxy_restart_publishes_validated_new_inode_and_keeps_t3(self):
+        self.edit_policy()
+        inode = (self.paths.runtime / 'policy/active.json').stat().st_ino
+        self.assertEqual(self.launcher.proxy_restart('work'), 0)
+        self.assert_t3_untouched()
+        self.assertNotEqual(inode, (self.paths.runtime / 'policy/active.json').stat().st_ino)
+        self.assertEqual(self.validated, self.restart_snapshot)
+        self.assertNotEqual(self.old, self.restart_snapshot)
+        validator = next(a for a in self.fake.calls if a[0] == 'run')
+        self.assertIn('--network=none', validator)
+        self.assertIn('sha256:proxy', validator)
+        self.assertNotIn('--env-file', validator)
+        self.assertIn('--cap-drop=all', validator)
+        self.assertIn('--rm', validator)
+
+    def test_invalid_policy_keeps_old_proxy_and_digest(self):
+        self.f.write('work', {'network': {'allow': {'ports': ['bad']}}})
+        with self.assertRaises(ValueError):
+            self.launcher.proxy_restart('work')
+        self.assertEqual((self.paths.runtime / 'policy/active.json').read_bytes(), self.old)
+        self.assertTrue(self.fake.containers[self.identity.proxy]['State']['Running'])
+        self.assertFalse(any(a[0] == 'stop' for a in self.fake.calls))
+
+    def test_actual_proxy_software_rejects_candidate_before_stop(self):
+        self.edit_policy()
+        self.validation_error = True
+        with self.assertRaises(subprocess.SubprocessError):
+            self.launcher.proxy_restart('work')
+        self.assertEqual((self.paths.runtime / 'policy/active.json').read_bytes(), self.old)
+        self.assertTrue(self.fake.containers[self.identity.proxy]['State']['Running'])
+        self.assertFalse(any(a[0] == 'stop' for a in self.fake.calls))
+
+    def test_topology_edit_requires_recreate_without_stopping_proxy(self):
+        self.f.write('work', {'server': {'port': 3888}})
+        with self.assertRaisesRegex(ValueError, 'recreate'):
+            self.launcher.proxy_restart('work')
+        self.assertFalse(any(a[0] in ('stop', 'run') for a in self.fake.calls))
+
+    def test_failed_proxy_restart_leaves_t3_running_and_no_fallback(self):
+        self.edit_policy()
+        self.start_error = True
+        with self.assertRaises(subprocess.SubprocessError):
+            self.launcher.proxy_restart('work')
+        self.assert_t3_untouched()
+        self.assertFalse(self.fake.containers[self.identity.proxy]['State']['Running'])
+        self.assertNotEqual((self.paths.runtime / 'policy/active.json').read_bytes(), self.old)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.launcher.dispatch('status', 'work')
+        self.assertIn('active policy: unavailable', out.getvalue())
+        self.assertIn('saved policy: ', out.getvalue())
+        self.assertIn(json.loads(self.restart_snapshot)['digest'], out.getvalue())
+
+    def test_metadata_failure_stops_replacement_without_rolling_back(self):
+        self.edit_policy()
+        atomic = self.launcher._atomic
+        def failing_metadata(path, data, mode):
+            if path.name == 'topology.json':
+                raise OSError('metadata write failed')
+            return atomic(path, data, mode)
+        with patch.object(self.launcher, '_atomic', failing_metadata), self.assertRaises(OSError):
+            self.launcher.proxy_restart('work')
+        self.assertFalse(self.fake.containers[self.identity.proxy]['State']['Running'])
+        self.assertNotEqual((self.paths.runtime / 'policy/active.json').read_bytes(), self.old)
+        self.assert_t3_untouched()
+
+    def test_validator_failure_removes_its_exact_owned_container(self):
+        from test_network import labels
+        self.validation_error = True
+        run = self.fake.run
+        name = None
+        def timed_out(args, **kwargs):
+            nonlocal name
+            if args[0] == 'run' and 'validate' in args:
+                name = args[args.index('--name') + 1]
+                self.fake.containers[name] = {'Id': name, 'Name': name,
+                    'Config': {'Labels': labels(self.identity, 'proxy')}, 'State': {'Running': True}}
+            return run(args, **kwargs)
+        self.fake.run = timed_out
+        with self.assertRaises(subprocess.SubprocessError):
+            self.launcher.proxy_restart('work')
+        self.assertEqual(set(self.fake.containers), {self.identity.container, self.identity.proxy})
+        self.assertTrue(self.fake.containers[self.identity.proxy]['State']['Running'])
+        self.assertEqual((self.paths.runtime / 'policy/active.json').read_bytes(), self.old)
+
+    def test_off_mode_does_not_create_proxy(self):
+        self.f.write('other', {'network': {'restricted': False}})
+        self.assertEqual(self.launcher.proxy_restart('other'), 0)
+        self.assertFalse(any(a[0] in ('run', 'stop', 'start') for a in self.fake.calls))
+
+    def test_candidate_profile_is_read_once_under_lock(self):
+        from t3_sandbox import launcher, paths
+        load = launcher.load_profile
+        reads = []
+        def read(*args):
+            with self.paths.lock.open('a') as lock:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            reads.append(args)
+            profile = load(*args)
+            self.edit_policy()
+            return profile
+        with patch.object(launcher, 'load_profile', read):
+            self.launcher.dispatch('proxy-restart', 'work')
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(self.restart_snapshot, self.old)
 
 
 if __name__ == '__main__':

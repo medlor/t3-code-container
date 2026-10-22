@@ -10,13 +10,16 @@ import shutil
 import subprocess
 import sys
 import time
+import tempfile
+import uuid
 
 from . import paths as storage
 from .paths import HostContext, ProfileIdentity, ProfilePaths
-from .podman import LABEL_PREFIX, Podman, published_bindings, resource_labels
+from .podman import LABEL_PREFIX, Podman, published_bindings, resource_labels, assert_owned
 from .profiles import Profile, initialize_profile, load_profile
 from . import network
-from .policy import encode_snapshot
+from .policy import encode_snapshot, decode_snapshot, MAX_SNAPSHOT_BYTES
+from .denials import read_denials
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -347,6 +350,153 @@ class Launcher:
                     self.podman.run(['network', 'rm', name])
             raise
 
+    def _validate_candidate(self, identity, image, directory, digest):
+        name = identity.proxy + '-validate-' + uuid.uuid4().hex[:12]
+        try:
+            validation = self.podman.run(['run', '--rm', '--pull=never', '--name', name,
+                *self._labels(identity, 'proxy'), '--network=none', '--userns=keep-id:uid=2003,gid=2003',
+                '--user=2003:2003', '--cap-drop=all', '--security-opt=no-new-privileges',
+                '--pid=private', '--ipc=private', '--pids-limit=32', '--memory=512m',
+                '--mount', f'type=bind,src={directory},dst=/run/t3-policy,ro',
+                image['Id'], 'validate', '--snapshot', '/run/t3-policy/active.json'], timeout=30)
+            try:
+                valid = json.loads(validation.stdout) == {'digest': digest}
+            except ValueError:
+                valid = False
+            if not valid:
+                raise ValueError('Gateway software did not validate the candidate policy digest')
+        finally:
+            # --rm normally handles this; an interrupted/timed-out engine client
+            # can leave its validator alive. Remove only this exact owned name.
+            remaining = self.podman.inspect('container', name)
+            if remaining is not None:
+                assert_owned(remaining, identity)
+                if resource_labels(remaining).get(LABEL_PREFIX + 'role') != 'proxy':
+                    raise ValueError('Refusing validator cleanup with a changed role')
+                self.podman.run(['rm', '--force', '--time=1', name])
+
+    def proxy_restart(self, name: str) -> int:
+        identity = ProfileIdentity(name, self.host.uid)
+        paths = storage.profile_paths(identity, self.profile_dir, self.host)
+        self._rootless()
+        with storage.mutation_lock(paths):
+            # One immutable candidate, including defaults, for this transaction.
+            profile = load_profile(name, self.profile_dir, self.host)
+            proxy = self.podman.inspect_owned('container', identity.proxy, identity, role='proxy')
+            if not profile.network.restricted:
+                if proxy:
+                    raise ValueError('Network mode changed. Run make recreate.')
+                print('Restricted mode is off; no gateway to restart.')
+                return 0
+            storage.validate_storage(profile, paths, self.host)
+            t3 = self._owned(identity)
+            if not proxy or not t3 or not t3.get('State', {}).get('Running'):
+                raise ValueError('Start the restricted sandbox first: make start')
+            # Pin validation to the existing software, even if its tag was rebuilt.
+            images = {}
+            for role, resource in (('proxy', proxy), ('t3', t3)):
+                image = self.podman.inspect('image', resource['Image'])
+                if image is None:
+                    raise ValueError('Existing container image is unavailable; run make recreate')
+                assert_owned(image, identity)
+                if resource_labels(image).get(LABEL_PREFIX + 'role') != role:
+                    raise ValueError('Existing image role changed; run make recreate')
+                images[role] = image
+            for role, resource in (('proxy', proxy), ('t3', t3)):
+                self._check_restricted_container(profile, paths, identity, resource, images[role], proxy=role == 'proxy')
+            gateway = network.ensure_networks(self.podman, identity, profile.server, create=False)
+            topology_file = paths.runtime / 'topology.json'
+            try:
+                active = json.loads(topology_file.read_bytes())
+            except (OSError, ValueError) as exc:
+                raise ValueError('Missing runtime topology. Run make recreate.') from exc
+            snapshot = encode_snapshot(profile.network.allow, gateway)
+            candidate = json.loads(snapshot)
+            if active.get('topology_digest') != topology_digest(profile, paths) or active.get('gateway') != candidate['gateway']:
+                raise ValueError('Network topology changed. Run make recreate.')
+            # A failed previous replacement can be retried without starting T3.
+            network.harden_bridge(self.podman, identity)
+            if proxy.get('State', {}).get('Running'):
+                network.assert_isolated(self.podman, identity, gateway)
+            with tempfile.TemporaryDirectory(prefix='candidate-', dir=paths.runtime) as temporary:
+                directory = Path(temporary)
+                directory.chmod(0o755)
+                self._atomic(directory / 'active.json', snapshot, 0o644)
+                self._validate_candidate(identity, images['proxy'], directory, candidate['digest'])
+                # The existing directory mount observes this new inode atomically.
+                os.replace(directory / 'active.json', paths.runtime / 'policy/active.json')
+            try:
+                if proxy.get('State', {}).get('Running'):
+                    self.podman.run(['stop', identity.proxy])
+                self.podman.run(['start', identity.proxy])
+                self._wait_proxy(identity, candidate['digest'])
+                current = self.podman.inspect_owned('container', identity.proxy, identity, role='proxy')
+                self._check_restricted_container(profile, paths, identity, current, images['proxy'], proxy=True)
+                network.harden_bridge(self.podman, identity)
+                network.assert_isolated(self.podman, identity, gateway)
+                self._wait_ready(identity)
+                # Verify the published relay, not just T3's local listener.
+                address = {'0.0.0.0': '127.0.0.1', '::': '::1'}.get(profile.server.bind_address, profile.server.bind_address)
+                if ':' in address:
+                    address = '[' + address + ']'
+                subprocess.run(['curl', '--fail', '--silent', '--show-error', '--noproxy', '*',
+                    '--connect-timeout', '2', '--max-time', '5', '--output', '/dev/null',
+                    f'http://{address}:{profile.server.port}/'], check=True, timeout=10,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self._atomic(topology_file, json.dumps({**active, 'policy_digest': candidate['digest']}, sort_keys=True).encode() + b'\n', 0o600)
+            except BaseException:
+                # Never restore a broader previous policy or touch the workload.
+                current = self.podman.inspect_owned('container', identity.proxy, identity, role='proxy')
+                if current and current.get('State', {}).get('Running'):
+                    self.podman.run(['stop', identity.proxy])
+                raise
+            print('Proxy policy restarted; T3 remains running. Active streams must reconnect.')
+            return 0
+
+    def _firewall_logs(self, identity, paths, *, tail, follow):
+        proxy = self.podman.inspect_owned('container', identity.proxy, identity, role='proxy')
+        if proxy is None:
+            raise ValueError('No owned restricted-mode gateway exists for this profile')
+        mounts = [m for m in proxy.get('Mounts', []) if m.get('Destination') == '/var/log/t3-proxy']
+        if (len(mounts) != 1 or mounts[0].get('Type') != 'bind' or
+                mounts[0].get('Source') != str(paths.logs.resolve()) or paths.logs.is_symlink() or
+                not paths.logs.is_dir() or paths.logs.stat().st_uid != os.getuid() or paths.logs.stat().st_mode & 0o077):
+            raise ValueError('Gateway log directory is not the owned private profile directory')
+        try:
+            for record in read_denials(paths.logs, tail=tail, follow=follow):
+                print(record.json_line(), end='', flush=True)
+        except KeyboardInterrupt:
+            return 130
+        return 0
+
+    def _policy_status(self, identity, paths, proxy):
+        digest = None
+        if proxy and proxy.get('State', {}).get('Running'):
+            ready = self.podman.run(['exec', identity.proxy, 'cat', '/run/t3-proxy/ready.json'], check=False)
+            try:
+                value = json.loads(ready.stdout)
+                current = self.podman.inspect_owned('container', identity.proxy, identity, role='proxy')
+                if (ready.returncode == 0 and isinstance(value, dict) and set(value) == {'digest'} and
+                        isinstance(value['digest'], str) and re.fullmatch('[0-9a-f]{64}', value['digest']) and
+                        current and current.get('State', {}).get('Running')):
+                    digest = value['digest']
+            except ValueError:
+                pass
+        print('active policy: ' + (digest or 'unavailable'))
+        try:
+            if not paths.profile_file.is_file():
+                raise ValueError('Missing profile')
+            profile = load_profile(identity.name, self.profile_dir, self.host)
+            if not profile.network.restricted:
+                saved = 'off'
+            else:
+                with (paths.runtime / 'policy/active.json').open('rb') as stream:
+                    _, gateway = decode_snapshot(stream.read(MAX_SNAPSHOT_BYTES + 1))
+                saved = json.loads(encode_snapshot(profile.network.allow, gateway))['digest']
+        except (OSError, ValueError):
+            saved = 'invalid or missing'
+        print('saved policy: ' + saved)
+
     def _stop(self, identity):
         # Deterministic owned discovery is independent of broken/missing YAML.
         for name, role in ((identity.container, 't3'), (identity.proxy, 'proxy')):
@@ -369,12 +519,14 @@ class Launcher:
             raise ValueError('Start the sandbox first: make start')
 
     def dispatch(self, command: str, name: str, *, cmd: str | None = None, follow=True, tail=100) -> int:
+        if command == 'proxy-restart':
+            return self.proxy_restart(name)
         identity = ProfileIdentity(name, self.host.uid)
         paths = storage.profile_paths(identity, self.profile_dir, self.host)
         if command == 'init':
             print('Profile: ' + str(initialize_profile(name, self.profile_dir, self.host)))
             return 0
-        recovery = command in ('stop', 'remove', 'status', 'logs')
+        recovery = command in ('stop', 'remove', 'status', 'logs', 'firewall-logs')
         profile = None if recovery else load_profile(name, self.profile_dir, self.host)
         if command == 'config':
             print(json.dumps({'profile': str(profile.source), 'container': identity.container, 'image': identity.image,
@@ -408,12 +560,16 @@ class Launcher:
                         self._remove(identity)
                     self._start(profile, paths, identity)
             return 0
+        if command == 'firewall-logs':
+            return self._firewall_logs(identity, paths, tail=tail, follow=follow)
         if command == 'status':
             for resource_name, role in ((identity.container, 't3'), (identity.proxy, 'proxy')):
                 resource = self.podman.inspect_owned('container', resource_name, identity, role=role)
                 print(resource_name + ': ' + ('running' if resource.get('State', {}).get('Running') else 'stopped') if resource else resource_name + ': absent')
                 if resource:
                     print(json.dumps(resource.get('HostConfig', {}).get('PortBindings', {})))
+                if role == 'proxy' and resource:
+                    self._policy_status(identity, paths, resource)
         elif command == 'logs':
             if not self._owned(identity):
                 raise ValueError('No owned container exists for this profile')

@@ -92,12 +92,14 @@ def _network(podman, identity, name, internal):
     return resource, subnets[0]
 
 
-def ensure_networks(podman: Podman, identity: ProfileIdentity, server: ServerSettings) -> GatewayConfig:
+def ensure_networks(podman: Podman, identity: ProfileIdentity, server: ServerSettings, *, create=True) -> GatewayConfig:
     """Called under the short host allocation lock; undo only our allocations."""
     runtime_preflight(podman)
     resolvers = _resolvers(podman)
     names = (identity.private_network, identity.external_network)
     existing = {name: podman.inspect_owned('network', name, identity) for name in names}
+    if not create and any(value is None for value in existing.values()):
+        raise IsolationError('Required network is absent; run make recreate')
     created = []
     try:
         for name, internal in zip(names, (True, False)):

@@ -107,6 +107,9 @@ make exec CMD='git status'
 make smoke                        # tools, HTTPS, server and real file ownership
 make logs                         # Ctrl-C leaves the container running
 make logs FOLLOW=0 TAIL=20
+make proxy-restart PROFILE=work    # apply saved allowlist; T3 keeps running
+make firewall-logs PROFILE=work    # latest 100 policy denials, then follow
+make firewall-logs PROFILE=work FOLLOW=0 TAIL=100  # finite JSONL output
 make stop
 make start
 make restart
@@ -133,8 +136,10 @@ Build/rebuild leave existing containers running on their original image. Start
 and restart reject changed mounts, ports, resource limits, health checks, env
 file path, or network settings until you explicitly recreate. Build selector
 and whitelist edits alone do not replace T3. The selected image ID is recorded
-separately from the runtime topology. Stop, status, logs and remove can recover
-owned resources even when the profile is invalid or missing. No global prune or
+separately from the runtime topology. Stop, status, logs, firewall-logs and remove
+can recover owned resources even when the profile is invalid or missing. Status
+shows the running gateway readiness digest separately from the saved YAML policy
+digest; an unavailable gateway or invalid saved policy is reported explicitly. No global prune or
 state deletion target is provided.
 
 Automatic Podman health timers are disabled by default. Startup checks T3's
@@ -181,9 +186,21 @@ Runtime policy and topology snapshots live outside T3 mounts in the profile's
 `runtime` directory; gateway denial logs live in its separate `logs` directory.
 The gateway receives only its read-only policy directory and its logs. Start
 checks actual image IDs, mounts, ports and network memberships before reuse.
-Topology changes require `make recreate`; allowlist-only changes are reported
-with a `make proxy-restart` diagnostic (the command arrives in the next lifecycle
-step). Until then, `make recreate` applies policy edits with a T3 interruption.
+Topology changes require `make recreate`. Apply saved allowlist edits with
+`make proxy-restart PROFILE=work`: the candidate is validated using the existing
+gateway image before its policy is published atomically and only that gateway
+is restarted. T3 keeps its identity, process, mounts and private address. Active
+management and outbound streams must reconnect during the brief interruption.
+Invalid candidates leave the running gateway untouched. A failed replacement
+leaves the gateway unavailable, with the candidate retained and no policy
+rollback or unrestricted fallback; fix the policy and retry `make proxy-restart`.
+
+`make firewall-logs PROFILE=work` prints normalized denial JSONL records from only
+the selected profile, showing the latest 100 records across retained files and
+following rotation and gateway restarts. Use `FOLLOW=0 TAIL=100` for finite output
+in chronological file order; selectors do not modify YAML. Ctrl-C stops viewing
+and leaves containers running. Diagnostics use stderr. This is a proxy-policy
+log: direct attempts that fail locally because T3 has no route never reach it.
 Stop shuts down T3 before the gateway. Remove preserves persistent homes and logs.
 Restricted mode never falls back to unrestricted networking.
 The restricted-mode compiler currently supports only IPv4 external subnets and

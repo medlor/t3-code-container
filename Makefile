@@ -10,7 +10,7 @@ override CMD := $(value CMD)
 override FOLLOW := $(value FOLLOW)
 override TAIL := $(value TAIL)
 export PROFILE PROFILE_DIR CMD FOLLOW TAIL
-.PHONY: help init doctor build rebuild start stop restart recreate remove status logs shell exec pair smoke config
+.PHONY: help init doctor build rebuild start stop restart recreate remove status logs proxy-restart firewall-logs shell exec pair smoke config
 
 help:
 	@echo 'make init       Create persistent YAML profile (PROFILE=default)'
@@ -27,8 +27,10 @@ help:
 	@echo 'make pair       Generate a fresh T3 pairing link'
 	@echo 'make smoke      Check tools, network, and host file ownership'
 	@echo 'make logs       Follow logs (Ctrl-C leaves container running)'
+	@echo 'make proxy-restart  Apply allowlist edits without restarting T3'
+	@echo 'make firewall-logs  Show policy denials (FOLLOW=0 TAIL=100 for finite output)'
 	@echo 'make status     Show container status and published ports'
 	@echo 'make config     Show resolved non-secret settings'
 
-init doctor build rebuild start stop restart recreate remove status logs shell exec pair smoke config:
+init doctor build rebuild start stop restart recreate remove status logs proxy-restart firewall-logs shell exec pair smoke config:
 	@bash scripts/sandbox.sh $@

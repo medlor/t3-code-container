@@ -15,7 +15,7 @@ from t3_sandbox.podman import Podman
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('command', choices=('init', 'doctor', 'build', 'rebuild', 'start', 'stop', 'restart',
-        'recreate', 'remove', 'status', 'logs', 'shell', 'exec', 'pair', 'smoke', 'config'))
+        'recreate', 'remove', 'status', 'logs', 'proxy-restart', 'firewall-logs', 'shell', 'exec', 'pair', 'smoke', 'config'))
     parser.add_argument('--profile', default=os.environ.get('PROFILE', 'default'))
     parser.add_argument('--profile-dir', type=Path, default=os.environ.get('PROFILE_DIR') or None)
     parser.add_argument('--cmd', default=os.environ.get('CMD'))
