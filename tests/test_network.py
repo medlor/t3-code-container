@@ -529,6 +529,40 @@ class RestrictedNetworkTests(unittest.TestCase):
         self.assertFalse(self.fake.containers)
         self.assertFalse(self.fake.networks)
 
+    def test_reuse_rejects_gateway_tmpfs_shadowing_trusted_runtime(self):
+        self.start()
+        for representation in ('mounts', 'host_config', 'both'):
+            with self.subTest(representation=representation):
+                original = deepcopy(self.fake.containers[self.identity.proxy])
+                gateway = self.fake.containers[self.identity.proxy]
+                if representation in ('mounts', 'both'):
+                    gateway['Mounts'].append({'Type': 'tmpfs', 'Source': 'tmpfs',
+                                              'Destination': '/usr/local/lib/t3-proxy', 'RW': True})
+                if representation in ('host_config', 'both'):
+                    gateway['HostConfig']['Tmpfs'] = {'/usr/local/lib/t3-proxy': 'rw,exec'}
+                try:
+                    with self.assertRaisesRegex(ValueError, 'recreate|mount'):
+                        self.start()
+                finally:
+                    self.fake.containers[self.identity.proxy] = original
+
+    def test_reuse_rejects_t3_tmpfs_outside_validated_browser_cache(self):
+        self.start()
+        for representation in ('mounts', 'host_config', 'both'):
+            with self.subTest(representation=representation):
+                original = deepcopy(self.fake.containers[self.identity.container])
+                workload = self.fake.containers[self.identity.container]
+                if representation in ('mounts', 'both'):
+                    workload['Mounts'].append({'Type': 'tmpfs', 'Source': 'tmpfs',
+                                               'Destination': '/opt/t3-runtime', 'RW': True})
+                if representation in ('host_config', 'both'):
+                    workload['HostConfig']['Tmpfs']['/opt/t3-runtime'] = 'rw,exec'
+                try:
+                    with self.assertRaisesRegex(ValueError, 'recreate|mount|browser'):
+                        self.start()
+                finally:
+                    self.fake.containers[self.identity.container] = original
+
     def test_reuse_rejects_missing_browser_tmpfs_and_changed_proxy_environment(self):
         self.start()
         for mutate in (

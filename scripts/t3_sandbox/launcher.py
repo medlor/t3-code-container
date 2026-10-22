@@ -261,7 +261,10 @@ class Launcher:
         expected_mounts = {(str(source.resolve()), destination, not proxy or destination != '/run/t3-policy')
             for source, destination in ([(paths.runtime / 'policy', '/run/t3-policy'), (paths.logs, '/var/log/t3-proxy')]
                 if proxy else storage._mounts(profile, paths, self.host))}
-        actual_mounts = {(m.get('Source'), m.get('Destination'), m.get('RW')) for m in resource.get('Mounts', []) if m.get('Type') != 'tmpfs'}
+        browser_target = None if proxy else browser_cache_mount(profile, self.host)[1].split(':', 1)[0]
+        actual_mounts = {(m.get('Source'), m.get('Destination'), m.get('RW'))
+            for m in resource.get('Mounts', [])
+            if not (not proxy and m.get('Type') == 'tmpfs' and m.get('Destination') == browser_target)}
         hc = resource.get('HostConfig', {})
         expected_ports = {'3773/tcp': [{'HostIp': profile.server.bind_address, 'HostPort': str(profile.server.port)}]} if proxy else {}
         caps = {'CAP_NET_ADMIN', 'CAP_SETUID', 'CAP_SETGID', 'CAP_SETPCAP', 'CAP_CHOWN'} if proxy else set()
@@ -278,7 +281,7 @@ class Launcher:
                 resource.get('Config', {}).get('User') != ('0:0' if proxy else f'{self.host.uid}:{self.host.gid}') or
                 not keep_id or hc.get('ExtraHosts') or hc.get('Dns') or
                 resource.get('ResolvConfPath') != '' or resource.get('HostsPath') != '' or
-                (proxy and hc.get('Init'))):
+                (proxy and (hc.get('Init') or hc.get('Tmpfs')))):
             raise network.IsolationError(f'Actual {role} image, mounts, bind/ports or namespace controls changed. Run make recreate.')
         if resource_labels(resource).get(LABEL_PREFIX + 'topology') != topology_digest(profile, paths):
             raise ValueError('Project, port, state mounts or runtime settings changed. Run make recreate to apply the new settings.')
