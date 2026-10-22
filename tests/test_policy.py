@@ -66,6 +66,25 @@ class ProtectionTests(unittest.TestCase):
         self.assertTrue(policy.is_protected_address("9.10.11.99", public_topology))
         self.assertTrue(policy.is_protected_address("9.10.12.99", public_topology))
 
+    def test_rejects_ipv6_operational_subnets_and_resolvers(self):
+        allow = Allowlist(("example.com",), ("2001:4860:4860::8888",), (443,))
+        baseline = json.loads(policy.encode_snapshot(allow, gateway()))
+        cases = (
+            ("external_cidrs", ("2001:4860::/64",)),
+            ("external_cidrs", ("10.89.2.0/24", "2001:4860::/64")),
+            ("dns_servers", ("2001:4860:4860::8888",)),
+            ("dns_servers", ("1.1.1.1", "2001:4860:4860::8888")),
+        )
+        for field, values in cases:
+            topology = replace(gateway(), **{field: values})
+            with self.subTest(field=field, values=values, boundary="compiler"), self.assertRaisesRegex(ValueError, field + ".*IPv4"):
+                policy.compile_policy(allow, topology, proxy_uid=2001, relay_uid=2002)
+            with self.subTest(field=field, values=values, boundary="encoder"), self.assertRaisesRegex(ValueError, field + ".*IPv4"):
+                policy.encode_snapshot(allow, topology)
+            snapshot = {**baseline, "gateway": {**baseline["gateway"], field: list(values)}}
+            with self.subTest(field=field, values=values, boundary="decoder"), self.assertRaisesRegex(ValueError, field + ".*IPv4"):
+                policy.decode_snapshot(json.dumps(snapshot).encode())
+
     def test_invalid_addresses_and_topology_fail_closed(self):
         for address in ("example.com", "fe80::1%eth0", "8.8.8.8\n", 123):
             with self.subTest(address=address), self.assertRaises(ValueError):

@@ -2,6 +2,9 @@
 
 Squid restricts names; nft independently restricts actual destination addresses.
 The policy digest identifies the allowlist, not topology or daemon identities.
+Operational external subnets and resolvers are IPv4-only in this version. IPv6
+allowlist parsing, host-address protection, and mapped-address denial remain
+enabled; IPv6 egress requires a separately reviewed neighbor-discovery policy.
 No DNS lookups, subprocesses, file writes, or firewall operations occur here.
 """
 from dataclasses import asdict, dataclass, fields
@@ -125,11 +128,15 @@ def _gateway(value):
         if endpoint not in private or endpoint in (private.network_address, private.broadcast_address) or endpoint.is_multicast or endpoint.is_unspecified or endpoint.is_loopback or endpoint.is_link_local:
             raise ValueError("Private endpoints must be usable addresses in the private subnet")
     external = tuple(_network(item, strict=True) for item in _tuple(value.external_cidrs, "external_cidrs"))
-    if not external or any(item.version == private.version and item.overlaps(private) for item in external):
+    if any(item.version != 4 for item in external):
+        raise ValueError("Operational external_cidrs must contain only IPv4 subnets; IPv6 egress is unsupported")
+    if not external or any(item.overlaps(private) for item in external):
         raise ValueError("External subnets must be present and separate from the private subnet")
     hosts = tuple(_address(item) for item in _tuple(value.host_ips, "host_ips"))
     dns = tuple(_address(item) for item in _tuple(value.dns_servers, "dns_servers"))
-    if not dns or any(item.is_unspecified or item.is_multicast or (item.version == 6 and item.ipv4_mapped is not None) for item in dns):
+    if any(item.version != 4 for item in dns):
+        raise ValueError("Operational dns_servers must contain only IPv4 addresses; IPv6 DNS is unsupported")
+    if not dns or any(item.is_unspecified or item.is_multicast for item in dns):
         raise ValueError("DNS resolvers must be explicit unicast IP addresses")
     return GatewayConfig(str(proxy), str(t3), str(private), tuple(sorted(set(map(str, external)))),
         tuple(sorted(set(map(str, hosts)))), tuple(sorted(set(map(str, dns)))), str(_address(value.bind_address)), _port(value.host_port))
@@ -224,7 +231,11 @@ def _nft(allow, gateway, protected, proxy_uid, relay_uid):
 
 
 def compile_policy(value: Allowlist, gateway: GatewayConfig, *, proxy_uid: int, relay_uid: int) -> CompiledPolicy:
-    """Generate complete standalone Squid and isolated-namespace nft configs."""
+    """Generate standalone policy for IPv4 external topology and DNS resolvers.
+
+    IPv6 operational topology is rejected until neighbor discovery has a reviewed
+    policy; IPv6 allowlist syntax and protected-destination guards are retained.
+    """
     allow, gateway = normalize_allowlist(value), _gateway(gateway)
     if any(type(uid) is not int or not 1 <= uid < 2**32 - 1 for uid in (proxy_uid, relay_uid)) or proxy_uid == relay_uid:
         raise ValueError("Proxy and relay UIDs must be distinct nonroot numeric identities")

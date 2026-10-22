@@ -166,6 +166,11 @@ only the T3 image/container. It uses
 reach LAN or host services; it is not an egress firewall. Restricted startup
 currently fails with an explicit “not implemented” message while the proxy
 implementation is developed. It never falls back to unrestricted networking.
+The restricted-mode compiler currently supports only IPv4 external subnets and
+DNS resolvers, and rejects IPv6 or mixed operational topology. IPv6-only
+resolvers and upstream services are unavailable in this version. IPv6
+allowlist parsing and protection of IPv6 host, private, and mapped addresses
+remain enabled; this does not provide IPv6 egress support.
 
 The container drops all capabilities, enables `no-new-privileges`, uses private
 PID/IPC namespaces and keeps default seccomp. It receives no engine or host

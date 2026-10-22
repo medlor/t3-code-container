@@ -177,6 +177,8 @@ Retain meaningful existing cases: restart an exited container using configured p
 
 ## Task 4: Compile allowlists and independent destination-address protection
 
+Support boundary: operational `external_cidrs` and `dns_servers` are IPv4-only in this version; reject IPv6 and mixed settings. Retain IPv6 allowlist parsing, IPv6 host/protected ranges, and mapped-address denial. IPv6 egress needs a separately reviewed neighbor-discovery extension.
+
 **Files:** Extend `policy.py`, profile validation, and `tests/test_policy.py`.
 
 **Interfaces:**
@@ -240,6 +242,8 @@ Name cases `test_validate_starts_no_daemons`, `test_firewall_failure_prevents_li
 - [ ] **Step 6: Rerun the full unit suite and commit:** `feat: add isolated Squid gateway and structured denial logs`.
 
 ## Task 6: Enforce private-network startup and lifecycle
+
+Support boundary: create/accept only IPv4 operational external topology and select only IPv4 resolvers. Reject unsupported IPv6/mixed external subnets or resolver settings before startup; retain IPv6 host-address discovery/protection and all private-bridge IPv6 hardening. Do not add ICMP/NDP exceptions to enable unsupported egress.
 
 **Files:** Create `network.py`, `tests/test_network.py`; extend `launcher.py`, `podman.py`, `tests/test_sandbox.py`, and README restricted-mode instructions.
 
@@ -340,6 +344,8 @@ Add `test_seed_is_local_and_works_with_empty_home`, `test_existing_shared_t3_cac
 - [ ] **Step 6: Build a selected test profile image and run its browser entry/CLI version probes with `--network=none` and an empty home.** Expected: browser binary and all CLIs are present, no dependency lookup occurs, and shared host-cache sentinels remain unchanged. Actual T3 browser rendering and Codex streaming are Task 9 acceptance checks. Run full unit suite, shell syntax checks, then commit: `feat: provision T3 browser assets during image build`.
 
 ## Task 9: Real Podman security/regression verification and migration guide
+
+Support boundary: verify IPv4-only operational external topology/resolvers and explicit rejection of IPv6/mixed settings. Keep every IPv6 direct-access, host-side bridge, protected-literal, and mapped-address negative test. IPv6-only resolver/upstream success is outside this version; no broader ICMP/NDP grant is authorized.
 
 **Files:** Create `tests/integration/{support,test_network,test_runtime}.py` and `docs/network-verification.md`; modify `Makefile` (`test`, `test-integration`, mode-aware `smoke`), README migration/operations, and affected launcher smoke code.
 
