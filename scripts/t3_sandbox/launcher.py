@@ -24,6 +24,18 @@ from .denials import read_denials
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def browser_cache_mount(profile: Profile, host: HostContext) -> list[str]:
+    return ['--tmpfs', f'/home/{host.user}/.t3/tools/chrome-headless-shell:rw,nosuid,nodev,exec,mode=1777,notmpcopyup']
+
+
+def proxy_environment(proxy: str) -> dict[str, str]:
+    values = {key: proxy for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY',
+                                    'http_proxy', 'https_proxy', 'all_proxy')}
+    values.update(NO_PROXY='localhost,127.0.0.1,::1', no_proxy='localhost,127.0.0.1,::1',
+                  NODE_USE_ENV_PROXY='1', T3_SANDBOX_BROWSER_PROXY=proxy)
+    return values
+
+
 def topology_digest(profile: Profile, paths: ProfilePaths) -> str:
     """Fingerprint settings that require container replacement, not image builds."""
     mounts = [('home', str(paths.home.resolve())), ('workspace', str(profile.project.directory.resolve()))]
@@ -31,7 +43,7 @@ def topology_digest(profile: Profile, paths: ProfilePaths) -> str:
         mounts.extend((leaf, str(getattr(profile.state, leaf + '_directory').resolve())) for leaf in ('codex', 'claude'))
     if profile.state.share_host_t3_state:
         mounts.append(('t3', str(profile.state.t3_directory.resolve())))
-    value = {'mounts': mounts, 'resources': asdict(profile.resources),
+    value = {'browser_cache_contract': 1, 'proxy_environment_contract': 1, 'mounts': mounts, 'resources': asdict(profile.resources),
              'network': 'restricted' if profile.network.restricted else 'slirp4netns:allow_host_loopback=false',
              'server': asdict(profile.server), 'runtime': {
                  'env_file': str(profile.runtime.env_file) if profile.runtime.env_file else None,
@@ -116,7 +128,35 @@ class Launcher:
             self.podman.run([*proxy, '-f', str(ROOT / 'proxy/Dockerfile'), '-t', identity.proxy_image,
                             *self._labels(identity, role='proxy'), str(ROOT)], timeout=3600, capture=False)
 
+    def _check_browser_runtime(self, profile, resource):
+        specification = browser_cache_mount(profile, self.host)[1]
+        target, options = specification.split(':', 1)
+        mounts = resource.get('HostConfig', {}).get('Tmpfs') or {}
+        actual = set(mounts.get(target, '').split(','))
+        required = set(options.split(',')) - {'notmpcopyup'}
+        if set(mounts) != {target} or not required <= actual or actual - required - {'rprivate'}:
+            raise ValueError('Actual browser tmpfs changed. Run make recreate.')
+        env_items = resource.get('Config', {}).get('Env') or []
+        env = dict(item.split('=', 1) for item in env_items if '=' in item)
+        if len(env) != len(env_items):
+            raise ValueError('Duplicate or malformed runtime environment. Run make recreate.')
+        if profile.network.restricted:
+            identity = ProfileIdentity(profile.name, self.host.uid)
+            private = self.podman.inspect('network', identity.private_network)
+            # Verify against the actual gateway address, not the container's own
+            # environment, which is the value being checked.
+            gateway = self.podman.inspect_owned('container', identity.proxy, identity)
+            address = (gateway or {}).get('NetworkSettings', {}).get('Networks', {}).get(identity.private_network, {}).get('IPAddress')
+            if not private or not address:
+                raise ValueError('Missing browser proxy network. Run make recreate.')
+            expected = proxy_environment(f'http://{address}:3128')
+        else:
+            expected = {'T3_SANDBOX_BROWSER_PROXY': ''}
+        if any(env.get(key) != value for key, value in expected.items()):
+            raise ValueError('Actual browser/proxy environment changed. Run make recreate.')
+
     def _check_existing(self, profile, paths, resource):
+        self._check_browser_runtime(profile, resource)
         bindings = published_bindings(resource).get('3773/tcp', [])
         wanted = [{'HostIp': profile.server.bind_address, 'HostPort': str(profile.server.port)}]
         actual = {(m['Source'], m['Destination']) for m in resource.get('Mounts', []) if m.get('Type') == 'bind'}
@@ -172,7 +212,7 @@ class Launcher:
         address = profile.server.bind_address
         return '[' + address + ']' if ':' in address else address
 
-    def _create_t3(self, profile, paths, identity, image, *, network_args, publish_args):
+    def _create_t3(self, profile, paths, identity, image, *, network_args, publish_args, browser_proxy=None):
         mounts = storage.prepare_home(profile, paths, self.host)
         home = '/home/' + self.host.user
         args = ['run', '--detach', '--name', identity.container, '--hostname', identity.container,
@@ -185,6 +225,7 @@ class Launcher:
             '--env', 'HOME=' + home, '--workdir', '/workspace']
         for source, destination in mounts:
             args += ['--mount', f'type=bind,src={source},dst={destination}']
+        args += browser_cache_mount(profile, self.host)
         if not profile.runtime.automatic_healthcheck:
             args.append('--no-healthcheck')
         for key in ('memory', 'cpus'):
@@ -193,6 +234,14 @@ class Launcher:
                 args += ['--' + key, str(value)]
         if profile.runtime.env_file:
             args += ['--env-file', str(profile.runtime.env_file)]
+        if profile.network.restricted:
+            if not browser_proxy:
+                raise ValueError('Restricted browser proxy endpoint is required')
+            for key, value in proxy_environment(browser_proxy).items():
+                args += ['--env', key + '=' + value]
+        else:
+            # Our own control variable must not be injected by an env file.
+            args += ['--env', 'T3_SANDBOX_BROWSER_PROXY=']
         self.podman.run([*args, identity.image], capture=False)
 
     def _atomic(self, path, data, mode):
@@ -207,10 +256,12 @@ class Launcher:
 
     def _check_restricted_container(self, profile, paths, identity, resource, image, *, proxy):
         role = 'proxy' if proxy else 't3'
+        if not proxy:
+            self._check_browser_runtime(profile, resource)
         expected_mounts = {(str(source.resolve()), destination, not proxy or destination != '/run/t3-policy')
             for source, destination in ([(paths.runtime / 'policy', '/run/t3-policy'), (paths.logs, '/var/log/t3-proxy')]
                 if proxy else storage._mounts(profile, paths, self.host))}
-        actual_mounts = {(m.get('Source'), m.get('Destination'), m.get('RW')) for m in resource.get('Mounts', [])}
+        actual_mounts = {(m.get('Source'), m.get('Destination'), m.get('RW')) for m in resource.get('Mounts', []) if m.get('Type') != 'tmpfs'}
         hc = resource.get('HostConfig', {})
         expected_ports = {'3773/tcp': [{'HostIp': profile.server.bind_address, 'HostPort': str(profile.server.port)}]} if proxy else {}
         caps = {'CAP_NET_ADMIN', 'CAP_SETUID', 'CAP_SETGID', 'CAP_SETPCAP', 'CAP_CHOWN'} if proxy else set()
@@ -329,10 +380,8 @@ class Launcher:
                 created.append(identity.container)
                 self._create_t3(profile, paths, identity, images['t3'], network_args=[
                     '--network=' + identity.private_network + ':ip=' + gateway.t3_ip,
-                    '--dns=none', '--no-hosts', '--env', f'HTTP_PROXY=http://{gateway.private_ip}:3128',
-                    '--env', f'HTTPS_PROXY=http://{gateway.private_ip}:3128',
-                    '--env', f'http_proxy=http://{gateway.private_ip}:3128',
-                    '--env', f'https_proxy=http://{gateway.private_ip}:3128'], publish_args=[])
+                    '--dns=none', '--no-hosts'], publish_args=[],
+                    browser_proxy=f'http://{gateway.private_ip}:3128')
             network.assert_isolated(self.podman, identity, gateway)
             self._atomic(topology_file, json.dumps({'version': 1, 'topology_digest': topology_digest(profile, paths),
                 'gateway': asdict(gateway), 'policy_digest': digest}, sort_keys=True).encode() + b'\n', 0o600)

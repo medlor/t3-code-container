@@ -165,6 +165,28 @@ still need their own installation. Use Linux filesystem paths; Windows mounts
 may have synthesized permissions and slower operations. Supplementary host
 groups are not passed through.
 
+T3's native release and its required sidecar files are installed under
+`/opt/t3-runtime`. During the image build, an isolated local T3 server invokes
+that release's own pinned browser installer. The build first initializes an
+MCP session; releases requiring agent thread scope use the authenticated local
+`preview.open` WebSocket RPC instead. Generated credentials and server state
+are removed within the same build layer. Unsupported interfaces fail the build.
+
+Browser files and their version/hash manifest live in `/opt/t3-browser`.
+Startup verifies them locally and seeds an executable wrapper into a writable
+tmpfs at `~/.t3/tools/chrome-headless-shell`. This shadows only the rebuildable
+browser cache, preserving shared host browser files and the rest of the home.
+No browser or T3 runtime download is needed at startup, including with an empty
+home. A missing tmpfs or mismatched image assets stops startup before T3 runs.
+
+Restricted mode supplies both uppercase and lowercase HTTP/HTTPS/ALL proxy
+variables after the env file, loopback-only NO_PROXY, and Node 24's
+`NODE_USE_ENV_PROXY=1`. The browser wrapper uses Chromium's explicit HTTP proxy
+switch and keeps in-container loopback pages reachable. `T3_SANDBOX_BROWSER_PROXY`
+is launcher-owned; an env file cannot change it. Clients ignoring proxy settings
+remain subject to the network boundary. No browser sandbox-disabling flag is
+added automatically.
+
 Unrestricted networking is the default (`network.restricted: false`) and needs
 only the T3 image/container. It uses
 `slirp4netns:allow_host_loopback=false`. This allows outbound internet and can

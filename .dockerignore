@@ -2,8 +2,11 @@
 !Dockerfile
 !scripts/
 !scripts/entrypoint.sh
+!scripts/install-t3-browser.py
+!scripts/browser-launcher.sh
 !scripts/t3_sandbox/
 !scripts/t3_sandbox/__init__.py
+!scripts/t3_sandbox/browser.py
 !scripts/t3_sandbox/policy.py
 !scripts/t3_sandbox/denials.py
 !proxy/

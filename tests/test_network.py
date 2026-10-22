@@ -98,8 +98,9 @@ class NetworkEngine(Podman):
             image = next((item for item in a if item in self.images), None)
             self.containers[name] = {'Id': name, 'Name': name, 'Image': self.images[image]['Id'],
                 'Config': {'Labels': dict(item.split('=', 1) for i, item in enumerate(a) if i and a[i-1] == '--label'),
+                           'Env': [a[i+1] for i,v in enumerate(a) if v == '--env'],
                            'User': '0:0' if name.endswith('-proxy') else f'{self.host.uid}:{self.host.gid}'},
-                'HostConfig': {'PortBindings': bindings, 'NetworkMode': next(iter(nets)), 'PidMode': 'private',
+                'HostConfig': {'Tmpfs': dict(a[i+1].replace(',notmpcopyup', '').split(':', 1) for i,v in enumerate(a) if v == '--tmpfs'), 'PortBindings': bindings, 'NetworkMode': next(iter(nets)), 'PidMode': 'private',
                     'IpcMode': 'private', 'Privileged': False, 'SecurityOpt': ['no-new-privileges'],
                     'CapAdd': ['CAP_NET_ADMIN','CAP_SETUID','CAP_SETGID','CAP_SETPCAP','CAP_CHOWN'] if name.endswith('-proxy') else [],
                     'CapDrop': [], 'Dns': [], 'ExtraHosts': [],
@@ -527,6 +528,19 @@ class RestrictedNetworkTests(unittest.TestCase):
         self.assertTrue(self.paths.logs.exists())
         self.assertFalse(self.fake.containers)
         self.assertFalse(self.fake.networks)
+
+    def test_reuse_rejects_missing_browser_tmpfs_and_changed_proxy_environment(self):
+        self.start()
+        for mutate in (
+                lambda c: c['HostConfig'].update(Tmpfs={}),
+                lambda c: c['HostConfig'].update(Tmpfs={'/home/testuser/.t3/tools/chrome-headless-shell': 'rw,nosuid,nodev,noexec,mode=1777'}),
+                lambda c: c['Config'].update(Env=['HTTP_PROXY=http://wrong:3128']),
+                lambda c: c['Config']['Env'].append('NO_PROXY=*')):
+            original = deepcopy(self.fake.containers[self.identity.container])
+            mutate(self.fake.containers[self.identity.container])
+            with self.assertRaisesRegex(ValueError, 'recreate|proxy|browser'):
+                self.start()
+            self.fake.containers[self.identity.container] = original
 
 
 if __name__ == '__main__':

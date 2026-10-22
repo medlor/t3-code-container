@@ -85,8 +85,8 @@ elif a[0] == 'run':
             mounts.append({'Type': 'bind', 'Source': fields['src'], 'Destination': fields['dst']})
     publish = a[a.index('--publish') + 1].rsplit(':', 2)
     state.setdefault('container', {})[name] = {'Id': name, 'Name': name, 'Image': 'sha256:test-image',
-        'Config': {'Labels': labels}, 'Mounts': mounts,
-        'HostConfig': {'PortBindings': {'3773/tcp': [{'HostIp': publish[0], 'HostPort': publish[1]}]}},
+        'Config': {'Labels': labels, 'Env': [a[i+1] for i,v in enumerate(a) if v == '--env']}, 'Mounts': mounts,
+        'HostConfig': {'Tmpfs': dict(a[i+1].replace(',notmpcopyup', '').split(':', 1) for i,v in enumerate(a) if v == '--tmpfs'), 'PortBindings': {'3773/tcp': [{'HostIp': publish[0], 'HostPort': publish[1]}]}},
         'State': {'Running': not state.get('exit_on_start', False), 'ExitCode': 78}}
     json.dump(state, open(os.environ['PODMAN_STATE'], 'w'))
     print(name)

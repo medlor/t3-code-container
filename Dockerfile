@@ -43,6 +43,15 @@ RUN curl -fsSL https://claude.ai/install.sh -o /tmp/install-claude.sh \
     && install -m 0755 "$(readlink -f /root/.local/bin/claude)" /usr/local/bin/claude \
     && rm -rf /root/.claude /root/.local /tmp/install-claude.sh
 
+# Drive this installed T3 release's own pinned installer in disposable state.
+# Helper removes the entire temporary HOME/database/auth state in this RUN layer.
+COPY scripts/t3_sandbox/__init__.py scripts/t3_sandbox/browser.py /usr/local/lib/t3-sandbox/t3_sandbox/
+COPY scripts/install-t3-browser.py /usr/local/lib/t3-sandbox/install-t3-browser.py
+COPY --chmod=755 scripts/browser-launcher.sh /usr/local/libexec/t3-browser-launcher
+RUN python3 /usr/local/lib/t3-sandbox/install-t3-browser.py \
+    --t3 /usr/local/bin/t3 --destination /opt/t3-browser
+COPY scripts/t3_sandbox/browser.py /usr/local/lib/t3-sandbox/browser.py
+
 ARG HOST_USER=developer
 ARG HOST_UID=1000
 ARG HOST_GID=1000
