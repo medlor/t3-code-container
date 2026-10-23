@@ -10,8 +10,13 @@ bash -n scripts/sandbox.sh scripts/entrypoint.sh scripts/browser-launcher.sh
 git diff --check
 ```
 
-Local verification on 2026-10-23: **186 unit tests passed**; the real suite ran
-**28 cases: 25 passed, 3 browser prerequisite skips**, in 347.920 seconds.
+Final unit verification on 2026-10-23: **203 unit tests passed** (15.700 seconds),
+including the six fixture-cleanup regressions and eleven final lifecycle/lock
+regressions. The earlier unchanged real-network matrix ran **28 cases: 25 passed,
+3 browser prerequisite skips**, in 347.920 seconds. A separate final disposable
+shared-state fixture exercises restricted start/reuse/restart, rejection before
+stopping services, and published-endpoint failure cleanup; it does not replace
+or expand that network matrix.
 Shell syntax and whitespace checks passed. `shellcheck` was unavailable.
 Every test-owned container/network was absent after cleanup; cached build images
 were retained. Browser rendering and authenticated model validation remain

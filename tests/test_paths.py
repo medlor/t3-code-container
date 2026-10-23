@@ -3,6 +3,10 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 import subprocess
+import sqlite3
+import os
+import json
+from unittest.mock import patch
 import threading
 import unittest
 
@@ -304,6 +308,58 @@ class PodmanTests(unittest.TestCase):
             profile = replace(profile, state=replace(profile.state, share_host_t3_state=False))
             with self.assertRaises(ValueError):
                 storage.validate_t3_state_sharing(profile, paths, f.host, podman)
+
+
+class HostOwnershipTests(unittest.TestCase):
+    def setUp(self):
+        from t3_sandbox.launcher import Launcher
+        self.f = self.enterContext(ProfileFixture())
+        self.profile = self.f.load('work', {'state': {'share_host_t3_state': True}})
+        self.launcher = Launcher(None, self.f.host, self.f.profile_dir)
+        self.directory = self.profile.state.t3_directory / 'userdata'
+        self.directory.mkdir(parents=True)
+        self.lock = self.directory / 'server-owner.sqlite'
+        self.record = self.directory / 'server-runtime.json'
+        self.record.write_text(json.dumps({'version': 1, 'pid': os.getpid(), 'ownerId': 'old-container'}))
+
+    def test_host_exclusive_lock_blocks_without_runtime_record_or_state_writes(self):
+        self.record.unlink()
+        with sqlite3.connect(self.lock) as owner:
+            owner.execute('BEGIN EXCLUSIVE')
+            before = self.lock.read_bytes()
+            with self.assertRaisesRegex(ValueError, 'host T3 server'):
+                self.launcher._host_t3_preflight(self.profile)
+            # The probe cannot release or replace another server's transaction.
+            self.assertTrue(owner.in_transaction)
+            self.assertEqual(self.lock.read_bytes(), before)
+            owner.rollback()
+        self.launcher._host_t3_preflight(self.profile)
+        self.assertEqual(self.lock.read_bytes(), before)
+        self.assertFalse(self.record.exists())
+
+    def test_stale_container_record_with_unlocked_database_is_accepted(self):
+        sqlite3.connect(self.lock).close()
+        before = {p.name: p.read_bytes() for p in self.directory.iterdir()}
+        self.launcher._host_t3_preflight(self.profile)
+        self.assertEqual({p.name: p.read_bytes() for p in self.directory.iterdir()}, before)
+
+    def test_corrupt_or_unreadable_ownership_lock_fails_closed(self):
+        self.lock.write_bytes(b'corrupt SQLite database')
+        with self.assertRaisesRegex(ValueError, 'permissions and integrity'):
+            self.launcher._host_t3_preflight(self.profile)
+        self.assertEqual(self.lock.read_bytes(), b'corrupt SQLite database')
+        with patch('t3_sandbox.launcher.sqlite3.connect', side_effect=sqlite3.OperationalError('unable to open database file')):
+            with self.assertRaisesRegex(ValueError, 'permissions and integrity'):
+                self.launcher._host_t3_preflight(self.profile)
+
+    def test_wal_ownership_lock_is_explicitly_unsupported(self):
+        with sqlite3.connect(self.lock) as owner:
+            owner.execute('PRAGMA journal_mode=WAL')
+            owner.execute('BEGIN EXCLUSIVE')
+            before = {p.name: p.read_bytes() for p in self.directory.iterdir()}
+            with self.assertRaisesRegex(ValueError, 'journal mode'):
+                self.launcher._host_t3_preflight(self.profile)
+            self.assertEqual({p.name: p.read_bytes() for p in self.directory.iterdir()}, before)
 
 
 if __name__ == '__main__':

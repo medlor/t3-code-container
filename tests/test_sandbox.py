@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import pwd
 import subprocess
+import sqlite3
 import fcntl
 import io
 from contextlib import redirect_stdout
@@ -134,11 +135,26 @@ class LauncherTests(unittest.TestCase):
                                'origin': 'http://127.0.0.1:3773', 'startedAt': '2026-10-22T00:00:00Z'})
         record.write_text(contents)
         self.f.write('default', {})
-        result = self.run_make('start', profile='default')
+        with sqlite3.connect(record.parent / 'server-owner.sqlite') as owner:
+            owner.execute('BEGIN EXCLUSIVE')
+            result = self.run_make('start', profile='default')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('host T3 server', result.stderr)
         self.assertEqual(record.read_text(), contents)
         self.assertFalse(any(call[0] in ('run', 'start') for call in self.fake.calls()))
+
+    def test_stale_container_pid_record_does_not_claim_host_ownership(self):
+        record = self.f.host.home / '.t3/userdata/server-runtime.json'
+        record.parent.mkdir(parents=True)
+        contents = json.dumps({'version': 1, 'pid': os.getpid(), 'ownerId': 'old-container'})
+        record.write_text(contents)
+        self.f.write('default', {})
+        # No database is created by the preflight, even with a numerically live PID.
+        self.assertEqual(self.run_make('build', profile='default').returncode, 0)
+        result = self.run_make('start', profile='default')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(record.read_text(), contents)
+        self.assertFalse((record.parent / 'server-owner.sqlite').exists())
 
     def test_changed_resources_require_recreate(self):
         self.existing()
@@ -409,6 +425,7 @@ class ProxyRestartTests(unittest.TestCase):
         self.paths = profile_paths(self.identity, self.f.profile_dir, self.f.host)
         self.fake = NetworkEngine(self.identity, self.f.host)
         self.launcher = Launcher(self.fake, self.f.host, self.f.profile_dir)
+        self.enterContext(patch('t3_sandbox.launcher.subprocess.run', return_value=subprocess.CompletedProcess([], 0)))
         self.launcher.dispatch('start', 'work')
         self.before = deepcopy(self.fake.containers[self.identity.container])
         self.old = (self.paths.runtime / 'policy/active.json').read_bytes()

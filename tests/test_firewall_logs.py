@@ -4,6 +4,7 @@ import fcntl
 import io
 import json
 import os
+import subprocess
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -159,6 +160,7 @@ class FirewallCommandTests(unittest.TestCase):
         self.paths = profile_paths(self.identity, self.f.profile_dir, self.f.host)
         self.fake = NetworkEngine(self.identity, self.f.host)
         self.launcher = Launcher(self.fake, self.f.host, self.f.profile_dir)
+        self.enterContext(patch('t3_sandbox.launcher.subprocess.run', return_value=subprocess.CompletedProcess([], 0)))
         self.launcher.dispatch('start', 'work')
         self.fake.calls.clear()
         (self.paths.logs / 'denials.jsonl').write_text(record(1).json_line())

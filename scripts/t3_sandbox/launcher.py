@@ -1,12 +1,13 @@
 """Profile lifecycle policy; all external commands use argument arrays."""
 from dataclasses import asdict, replace
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -83,22 +84,32 @@ class Launcher:
     def _host_t3_preflight(self, profile):
         if not profile.state.share_host_t3_state:
             return
-        # Follow T3's persisted runtime discovery. This is only a preflight;
-        # T3's own lifetime lock arbitrates races. Never clear its runtime record.
-        record = profile.state.t3_directory / 'userdata/server-runtime.json'
+        # T3 holds BEGIN EXCLUSIVE on this data-free SQLite database for its
+        # lifetime (serverOwnership.ts). Namespace-local runtime PIDs cannot
+        # identify host owners. Probe read-only, never create/unlink a lock, and
+        # leave race arbitration to T3's own lifetime transaction at startup.
+        lock = profile.state.t3_directory / 'userdata/server-owner.sqlite'
         try:
-            state = json.loads(record.read_text())
-        except (FileNotFoundError, ValueError):
+            with lock.open('rb') as stream:
+                header = stream.read(20)
+            # A read-only SQLite WAL connection may create shared-memory files.
+            # Reject that unsupported format before opening a SQLite handle.
+            if len(header) == 20 and (header[18] == 2 or header[19] == 2):
+                raise ValueError('Unsupported T3 ownership lock journal mode; stop the host T3 server and inspect its state. Never delete its lock.')
+        except FileNotFoundError:
             return
-        if not isinstance(state, dict) or state.get('version') != 1 or type(state.get('pid')) is not int or state['pid'] <= 0:
-            return
+        except OSError as exc:
+            raise ValueError('Cannot inspect the shared T3 ownership lock; check state permissions and integrity. Never delete its lock.') from exc
         try:
-            os.kill(state['pid'], 0)
-        except ProcessLookupError:
-            return
-        except PermissionError:
-            pass
-        raise ValueError('The host T3 server is already running for the shared state directory; stop it or set state.share_host_t3_state: false. Never delete its lock.')
+            with closing(sqlite3.connect(lock.resolve().as_uri() + '?mode=ro', uri=True, timeout=0)) as connection:
+                mode = connection.execute('PRAGMA journal_mode').fetchone()[0]
+                if mode != 'delete':
+                    raise ValueError('Unsupported T3 ownership lock journal mode; stop the host T3 server and inspect its state. Never delete its lock.')
+                connection.execute('SELECT name FROM sqlite_master').fetchall()
+        except sqlite3.Error as exc:
+            if getattr(exc, 'sqlite_errorcode', None) == sqlite3.SQLITE_BUSY:
+                raise ValueError('The host T3 server is already running for the shared state directory; stop it or set state.share_host_t3_state: false. Never delete its lock.') from exc
+            raise ValueError('Cannot inspect the shared T3 ownership lock; check state permissions and integrity. Never delete its lock.') from exc
 
     def _validate_start(self, profile, paths):
         storage.validate_storage(profile, paths, self.host)
@@ -182,6 +193,24 @@ class Launcher:
                 return
             time.sleep(1)
         raise ValueError('Container is running, but T3 did not become ready within 30 seconds. Run make logs.')
+
+    def _wait_published_ready(self, profile):
+        # Probe the actual bind/port, independently of advertised pairing URLs
+        # and ambient proxy variables. Rootless publication can lag listeners.
+        address = {'0.0.0.0': '127.0.0.1', '::': '::1'}.get(profile.server.bind_address, profile.server.bind_address)
+        if ':' in address:
+            address = '[' + address + ']'
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            try:
+                subprocess.run(['curl', '--fail', '--silent', '--show-error', '--noproxy', '*',
+                    '--connect-timeout', '1', '--max-time', '2', '--output', '/dev/null',
+                    f'http://{address}:{profile.server.port}/'], check=True, timeout=3,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                return
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                time.sleep(0.1)
+        raise ValueError('Published T3 management endpoint did not become ready within 30 seconds. Check the host port transport.')
 
     def _start(self, profile, paths, identity):
         self._validate_start(profile, paths)
@@ -307,17 +336,16 @@ class Launcher:
             time.sleep(0.1)
         raise network.IsolationError('Gateway did not publish matching policy readiness within 30 seconds')
 
-    def _start_restricted(self, profile, paths, identity):
-        # All sharing/storage preflights precede resource and runtime mutations.
-        self._host_t3_preflight(profile)
-        images = {role: self.podman.inspect_owned('image', name, identity) for role, name in (
+    def _restricted_preflight(self, profile, paths, identity):
+        """Validate reuse without changing running resources or bridge controls."""
+        images = {role: self.podman.inspect_owned('image', name, identity, role=role) for role, name in (
             ('t3', identity.image), ('proxy', identity.proxy_image))}
         if any(image is None for image in images.values()):
             raise ValueError('Build both restricted-mode images first: make build')
         if any(resource_labels(images['t3']).get(LABEL_PREFIX + key) != value for key, value in {
                 'uid': str(self.host.uid), 'gid': str(self.host.gid), 'user': self.host.user}.items()):
             raise ValueError('Image was built for another user. Run make build as the current user.')
-        existing = {role: self.podman.inspect_owned('container', name, identity) for role, name in (
+        existing = {role: self.podman.inspect_owned('container', name, identity, role=role) for role, name in (
             ('t3', identity.container), ('proxy', identity.proxy))}
         # Check collisions for every deterministic resource before allocating any.
         initial_networks = {name: self.podman.inspect_owned('network', name, identity) for name in (
@@ -325,6 +353,26 @@ class Launcher:
         for role, resource in existing.items():
             if resource:
                 self._check_restricted_container(profile, paths, identity, resource, images[role], proxy=role == 'proxy')
+        if any(existing.values()):
+            gateway = network.ensure_networks(self.podman, identity, profile.server, create=False)
+            self._check_restricted_snapshot(profile, paths, gateway)
+        if not existing['t3'] or not existing['t3'].get('State', {}).get('Running'):
+            self._host_t3_preflight(profile)
+        return images, existing, initial_networks
+
+    def _check_restricted_snapshot(self, profile, paths, gateway):
+        snapshot = json.loads(encode_snapshot(profile.network.allow, gateway))
+        try:
+            active = json.loads((paths.runtime / 'topology.json').read_bytes())
+        except (OSError, ValueError) as exc:
+            raise ValueError('Missing runtime topology. Run make recreate.') from exc
+        if active.get('topology_digest') != topology_digest(profile, paths) or active.get('gateway') != snapshot['gateway']:
+            raise ValueError('Network topology changed. Run make recreate.')
+        if active.get('policy_digest') != snapshot['digest']:
+            raise ValueError('Allowlist changed. Run make proxy-restart to apply the policy.')
+
+    def _start_restricted(self, profile, paths, identity):
+        images, existing, initial_networks = self._restricted_preflight(profile, paths, identity)
         created, started = [], []
         try:
             allocation = replace(paths, lock=paths.lock.parent.parent / '.allocation.lock')
@@ -334,14 +382,7 @@ class Launcher:
             digest = json.loads(snapshot)['digest']
             topology_file = paths.runtime / 'topology.json'
             if any(existing.values()):
-                try:
-                    active = json.loads(topology_file.read_bytes())
-                except (OSError, ValueError) as exc:
-                    raise ValueError('Missing runtime topology. Run make recreate.') from exc
-                if active.get('topology_digest') != topology_digest(profile, paths) or active.get('gateway') != json.loads(snapshot)['gateway']:
-                    raise ValueError('Network topology changed. Run make recreate.')
-                if active.get('policy_digest') != digest:
-                    raise ValueError('Allowlist changed. Run make proxy-restart to apply the policy.')
+                self._check_restricted_snapshot(profile, paths, gateway)
             else:
                 for path, mode in ((paths.runtime, 0o700), (paths.runtime / 'policy', 0o755), (paths.logs, 0o700)):
                     if path.is_symlink():
@@ -391,6 +432,7 @@ class Launcher:
             self._atomic(topology_file, json.dumps({'version': 1, 'topology_digest': topology_digest(profile, paths),
                 'gateway': asdict(gateway), 'policy_digest': digest}, sort_keys=True).encode() + b'\n', 0o600)
             self._wait_ready(identity)
+            self._wait_published_ready(profile)
             print('T3 endpoint: ' + self._endpoint(profile) + ' (ready; restricted)')
         except BaseException:
             # Bound rollback to exact resources created or started by this call.
@@ -489,14 +531,7 @@ class Launcher:
                 network.harden_bridge(self.podman, identity)
                 network.assert_isolated(self.podman, identity, gateway)
                 self._wait_ready(identity)
-                # Verify the published relay, not just T3's local listener.
-                address = {'0.0.0.0': '127.0.0.1', '::': '::1'}.get(profile.server.bind_address, profile.server.bind_address)
-                if ':' in address:
-                    address = '[' + address + ']'
-                subprocess.run(['curl', '--fail', '--silent', '--show-error', '--noproxy', '*',
-                    '--connect-timeout', '2', '--max-time', '5', '--output', '/dev/null',
-                    f'http://{address}:{profile.server.port}/'], check=True, timeout=10,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self._wait_published_ready(profile)
                 self._atomic(topology_file, json.dumps({**active, 'policy_digest': candidate['digest']}, sort_keys=True).encode() + b'\n', 0o600)
             except BaseException:
                 # Never restore a broader previous policy or touch the workload.
@@ -607,7 +642,9 @@ class Launcher:
                     self._validate_start(profile, paths)
                     if command == 'restart':
                         resource = self._owned(identity)
-                        if resource and not profile.network.restricted:
+                        if profile.network.restricted:
+                            self._restricted_preflight(profile, paths, identity)
+                        elif resource:
                             self._check_existing(profile, paths, resource)
                         self._stop(identity)
                     if command == 'recreate':

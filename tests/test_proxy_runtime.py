@@ -1,5 +1,7 @@
 """Trusted gateway behavior; real packaged-daemon checks recorded in task report."""
 from dataclasses import asdict
+from contextlib import redirect_stderr
+import io
 import importlib.util
 import json
 import os
@@ -43,6 +45,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse((self.root / 'ready.json').exists())
 
     def test_serve_scopes_management_to_trusted_discovered_local_ipv4_addresses(self):
+        self.stderr = io.StringIO()
+        self.enterContext(redirect_stderr(self.stderr))
         compiled = []
         def capture(value):
             compiled.append(value)
@@ -53,6 +57,7 @@ class RuntimeTests(unittest.TestCase):
              patch.object(self.runtime, 'initialize', side_effect=capture), \
              patch.object(self.runtime, 'READY', self.root / 'ready.json'):
             self.assertEqual(self.runtime.serve(self.snapshot, self.root / 'logs'), 1)
+        self.assertEqual(self.stderr.getvalue(), 'Gateway initialization or supervision failed\n')
         self.assertEqual(len(compiled), 1)
         self.assertIn('ip daddr { 10.89.1.2, 10.89.2.7 } tcp dport 3773 accept', compiled[0].nft_conf)
 
@@ -65,15 +70,20 @@ class RuntimeTests(unittest.TestCase):
             self.runtime.validate_snapshot(self.root / 'missing')
 
     def test_validation_failure_clears_stale_readiness(self):
+        self.stderr = io.StringIO()
+        self.enterContext(redirect_stderr(self.stderr))
         ready = self.root / 'ready.json'
         ready.write_text('{"digest":"old"}')
         with patch.object(self.runtime.os, 'getpid', return_value=1), \
              patch.object(self.runtime, 'READY', ready), \
              patch.object(self.runtime, 'validate_snapshot', side_effect=ValueError('bad snapshot')):
             self.assertEqual(self.runtime.serve(self.snapshot, self.root / 'logs'), 1)
+        self.assertEqual(self.stderr.getvalue(), 'Gateway initialization or supervision failed\n')
         self.assertFalse(ready.exists())
 
     def test_firewall_failure_prevents_listener_start(self):
+        self.stderr = io.StringIO()
+        self.enterContext(redirect_stderr(self.stderr))
         with patch.object(self.runtime.os, 'getpid', return_value=1), \
              patch.object(self.runtime, 'local_ipv4_addresses', return_value=('10.89.1.2', '10.89.2.7')), \
              patch.object(self.runtime, 'validate_snapshot', return_value=policy.compile_policy(
@@ -81,6 +91,7 @@ class RuntimeTests(unittest.TestCase):
              patch.object(self.runtime, 'initialize', side_effect=RuntimeError('nft failed')), \
              patch.object(self.runtime.subprocess, 'Popen', side_effect=AssertionError('started listener')):
             self.assertNotEqual(self.runtime.serve(self.snapshot, self.root / 'logs'), 0)
+        self.assertEqual(self.stderr.getvalue(), 'Gateway initialization or supervision failed\n')
         self.assertFalse((self.root / 'ready.json').exists())
 
     def test_proxy_and_relay_drop_capabilities_and_use_distinct_uids(self):
@@ -110,8 +121,11 @@ class RuntimeTests(unittest.TestCase):
         self.assertFalse((self.root / 'ready.json').exists())
 
     def test_serving_requires_namespace_pid_one(self):
+        self.stderr = io.StringIO()
+        self.enterContext(redirect_stderr(self.stderr))
         with patch.object(self.runtime.os, 'getpid', return_value=123):
             self.assertEqual(self.runtime.serve(self.snapshot, self.root / 'logs'), 1)
+        self.assertEqual(self.stderr.getvalue(), 'Gateway serve must be namespace PID1\n')
 
     def test_readiness_is_passive_and_checks_exact_listener(self):
         rows = ('  sl  local_address rem_address st\n'

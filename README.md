@@ -73,8 +73,9 @@ Host SSH agents, OS keyrings and `~/.claude.json` are not mounted.
 A shared `.t3` contains the database, pairing credentials and environment identity.
 Use it with one T3 server at a time. Stop the host server before starting the
 default container, or set `state.share_host_t3_state: false` and recreate. The
-launcher checks active managed containers' actual mounts and live host runtime
-records. T3's own lifetime lock remains authoritative for races; never delete a
+launcher checks active managed containers' actual mounts and probes T3's existing
+SQLite lifetime lock before new or stopped shared-state launches. Container PID
+records do not establish host ownership. T3's lock remains authoritative for races; never delete a
 lock to work around an active server. Stored host project paths do not become
 `/workspace` automatically; register the project inside the container if needed.
 

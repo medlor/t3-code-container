@@ -237,12 +237,109 @@ class RestrictedNetworkTests(unittest.TestCase):
         self.paths = profile_paths(self.identity, self.f.profile_dir, self.f.host)
         self.fake = NetworkEngine(self.identity, self.f.host)
         self.launcher = Launcher(self.fake, self.f.host, self.f.profile_dir)
+        self.published = self.enterContext(patch(
+            "t3_sandbox.launcher.subprocess.run", return_value=subprocess.CompletedProcess([], 0)))
 
     def start(self):
         return self.launcher.dispatch('start', 'work')
 
     def mutations(self):
         return [a for a in self.fake.calls if a[0] in ('run', 'start') or a[:2] == ['network', 'create']]
+
+    def test_restart_rejects_unapplied_configuration_without_stopping_services(self):
+        self.start()
+        before = deepcopy(self.fake.containers)
+        for edit, action in (
+            ({'resources': {'pids_limit': 2047}}, 'recreate'),
+            ({'resources': {'pids_limit': 2048}, 'network': {'allow': {'domains': ['example.org']}}}, 'proxy-restart'),
+        ):
+            self.f.write('work', edit)
+            self.fake.calls.clear()
+            with self.subTest(action=action), self.assertRaisesRegex(ValueError, action):
+                self.launcher.dispatch('restart', 'work')
+            self.assertEqual(self.fake.containers, before)
+            self.assertFalse(any(a[0] in ('stop', 'start', 'run', 'rm') for a in self.fake.calls))
+            self.assertFalse(any('-w' in a for a in self.fake.calls))
+
+    def test_restart_checks_images_and_network_members_before_stopping(self):
+        self.start()
+        before = deepcopy(self.fake.containers)
+        image = self.fake.images.pop(self.identity.proxy_image)
+        with self.assertRaisesRegex(ValueError, 'Build'):
+            self.launcher.dispatch('restart', 'work')
+        self.fake.images[self.identity.proxy_image] = image
+        unrelated = deepcopy(before[self.identity.container])
+        unrelated.update(Id='unrelated', Name='unrelated')
+        self.fake.containers['unrelated'] = unrelated
+        self.fake.calls.clear()
+        with self.assertRaisesRegex(ValueError, 'member'):
+            self.launcher.dispatch('restart', 'work')
+        self.assertEqual(self.fake.containers, {**before, 'unrelated': unrelated})
+        self.assertFalse(any(a[0] in ('stop', 'start', 'run', 'rm') for a in self.fake.calls))
+
+    def test_published_readiness_retries_transient_failure_and_ignores_advertised_url(self):
+        self.f.write('work', {'server': {'advertised_url': 'https://external.example'}})
+        self.published.side_effect = [subprocess.CalledProcessError(7, ['curl']), subprocess.CompletedProcess([], 0)]
+        with patch('t3_sandbox.launcher.time.sleep'):
+            self.start()
+        self.assertEqual(self.published.call_count, 2)
+        self.assertEqual(self.published.call_args.args[0][-1], 'http://127.0.0.1:3774/')
+
+    def test_running_shared_t3_reuses_its_own_runtime_record(self):
+        import sqlite3
+        self.f.write('work', {'state': {'share_host_t3_state': True}})
+        self.start()
+        record = self.f.host.home / '.t3/userdata/server-runtime.json'
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(json.dumps({'version': 1, 'pid': os.getpid(), 'ownerId': 'container'}))
+        # Its lifetime lock is legitimately held by the running owned server.
+        with sqlite3.connect(record.parent / 'server-owner.sqlite') as owner:
+            owner.execute('BEGIN EXCLUSIVE')
+            before = deepcopy(self.fake.containers)
+            self.fake.calls.clear()
+            self.start()
+            self.assertEqual(self.fake.containers, before)
+            self.assertFalse(any(a[0] in ('stop', 'start', 'run', 'rm') and '-probe-' not in ' '.join(a)
+                                 for a in self.fake.calls))
+
+    def test_stopped_shared_t3_accepts_stale_container_pid_record(self):
+        self.f.write('work', {'state': {'share_host_t3_state': True}})
+        self.start()
+        self.launcher.dispatch('stop', 'work')
+        record = self.f.host.home / '.t3/userdata/server-runtime.json'
+        record.parent.mkdir(parents=True, exist_ok=True)
+        contents = json.dumps({'version': 1, 'pid': os.getpid(), 'ownerId': 'crashed-container'})
+        record.write_text(contents)
+        self.start()
+        self.assertTrue(self.fake.containers[self.identity.container]['State']['Running'])
+        self.assertEqual(record.read_text(), contents)
+        self.assertFalse((record.parent / 'server-owner.sqlite').exists())
+
+    def test_published_readiness_is_required_and_failure_cleans_only_operation_resources(self):
+        for phase in ('new', 'stopped', 'running'):
+            with self.subTest(phase=phase):
+                if phase == 'stopped':
+                    self.start()
+                    self.launcher.dispatch('stop', 'work')
+                elif phase == 'running':
+                    self.start()
+                before = deepcopy(self.fake.containers)
+                self.published.side_effect = subprocess.CalledProcessError(7, ['curl'])
+                clock = [0]
+                def advance(_):
+                    clock[0] += 31
+                with patch('t3_sandbox.launcher.time.monotonic', side_effect=lambda: clock[0]), \
+                     patch('t3_sandbox.launcher.time.sleep', side_effect=advance):
+                    with self.assertRaisesRegex(ValueError, 'published|Published'):
+                        self.start()
+                self.assertEqual(self.fake.containers, before)
+                if phase == 'new':
+                    self.assertFalse(self.fake.networks)
+                self.published.side_effect = None
+        args = self.published.call_args.args[0]
+        self.assertEqual(args[args.index('--noproxy') + 1], '*')
+        self.assertIn('http://127.0.0.1:3774/', args)
+        self.assertIn('--max-time', args)
 
     def test_bridge_hardened_before_only_private_t3_launch(self):
         self.start()
