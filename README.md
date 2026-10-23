@@ -241,3 +241,90 @@ Some nested browser/provider sandboxes depend on host kernel policies. Do not
 resolve failures with privileged mode or host sockets. T3's browser opt-out is
 `T3CODE_SERVER_BROWSER_SANDBOX=0` in the runtime env file; this reduces browser
 isolation and is not enabled by default.
+
+## Manual migration from `.env` and named home volumes
+
+Normal commands neither import legacy settings nor copy or delete legacy volumes.
+Initialize the selected profile, inspect its YAML, and translate values manually:
+
+| Legacy setting | Profile field or action |
+| --- | --- |
+| `SANDBOX` | Select `PROFILE=<name>` on every Make command |
+| `PROJECT_DIR` | `project.directory` |
+| `HOST_PORT` | `server.port`; select `server.bind_address` explicitly |
+| `SHARE_HOST_STATE` | `state.share_host_provider_state`; choose T3 sharing independently |
+| `SHARE_HOST_T3_STATE` | `state.share_host_t3_state` |
+| `HOST_T3_DIR`, `HOST_CODEX_DIR`, `HOST_CLAUDE_DIR` | Corresponding `state.*_directory` |
+| `UBUNTU_IMAGE`, `NODE_IMAGE` | `build.ubuntu_image`, `build.node_image` |
+| `CODEX_VERSION`, `CLAUDE_VERSION`, `T3_VERSION` | Corresponding `build.*_version` |
+| `MEMORY`, `CPUS`, `PIDS_LIMIT` | Corresponding `resources` fields; use YAML `null` to omit memory/CPU limits |
+| `AUTO_HEALTHCHECK` | `runtime.automatic_healthcheck` as YAML `true`/`false` |
+| `RUNTIME_ENV_FILE` | `runtime.env_file` |
+| `IMAGE` | No image override; images are derived from UID/profile and built from `build` selectors |
+
+The old `SHARE_HOST_STATE=0` disabled all sharing; translate that intent by
+setting both sharing flags to false. Strings such as `"0"` are not YAML booleans.
+Legacy profiles bound loopback; explicitly use `127.0.0.1` to retain that exposure.
+
+Copy a legacy private home only while **both old and new T3 servers are stopped**.
+First run `podman ps -a` and `podman volume inspect <exact-legacy-volume>`.
+Inspect the old container's mounts to distinguish the private home volume from
+host `.t3`/provider bind mounts: bind-mounted contents are not in that volume.
+The historical name was `t3-sandbox-<uid>-<SANDBOX>-home`; confirm it instead of
+guessing. Record its mountpoint, ownership and contents, and take an offline
+backup before changing anything. Do not remove database lock files.
+
+For a private-state destination, set both sharing flags false and initialize
+the profile without starting it. The following is a template for an **empty**
+destination; substitute reviewed absolute paths and the inspected exact volume:
+
+```bash
+podman volume inspect t3-sandbox-1000-main-home
+podman unshare ls -lan /absolute/inspected/volume/_data
+install -d -m 700 ~/.local/share/t3-sandbox/migrated/home
+# Inspect this directory; stop if it already contains state.
+ls -la ~/.local/share/t3-sandbox/migrated/home
+umask 077
+legacy_backup=$(mktemp /tmp/t3-legacy-home.XXXXXXXX)
+podman unshare tar -C /absolute/inspected/volume/_data -cpf "$legacy_backup" .
+# The backup may contain credentials: protect it and retain it offline.
+chmod 600 "$legacy_backup"
+podman unshare tar --no-same-owner -C ~/.local/share/t3-sandbox/migrated/home -xpf "$legacy_backup"
+```
+
+Rootless namespace root may map to your host user, while legacy workload files
+may have subordinate-ID ownership. Inspect the copied files as your ordinary
+user before starting; if inaccessible, stop and plan an explicit ownership
+conversion for only the copied destination. No automatic recursive chown is
+performed. Review old absolute paths and provider files before use. Build/start
+the new profile and verify its data; keep the original volume and backup until
+you have independently validated the migration. No volume deletion is required.
+
+## Verification and operating limits
+
+`make test` runs unit tests only. `T3_SANDBOX_INTEGRATION=1 make test-integration`
+builds images and runs real Podman tests with random `it-*` profiles, temporary
+homes and explicit cleanup; it needs the documented host prerequisites and
+internet access for permitted HTTPS controls. See
+[network verification](docs/network-verification.md) for coverage and limitations.
+`make smoke` checks local and published T3 readiness and project file ownership;
+restricted mode probes provider HTTPS, accepting an expected unauthenticated
+401/403, and does not contact npm.
+
+Mutating commands serialize on a per-profile lock outside removable runtime
+files. Separate profiles can operate concurrently. Never run two servers over
+one shared `.t3`. Allowlist edits require `proxy-restart`; changing structural
+settings requires `recreate`. Set `network.restricted: false`, then recreate to
+disable enforcement explicitly.
+
+A wildcard bind controls listening, while `server.advertised_url` controls the
+pairing URL; advertising an address does not open WSL/Windows/host firewalls or
+configure routing/TLS. Remote clients require separately configured forwarding
+and firewall rules. A successful host non-loopback check does not establish
+reachability from another physical device.
+
+Destination grants permit data transfer to that destination. HTTPS is tunneled
+without TLS interception, so grants do not restrict URL paths or content.
+The host, kernel, container engine and trusted gateway remain in the trust
+boundary. Proxy denial logs exclude direct local routing failures and upstream
+application 403 responses; they are not a complete traffic audit.

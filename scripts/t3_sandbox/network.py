@@ -7,7 +7,7 @@ import uuid
 
 from .paths import HostContext, ProfileIdentity, ProfilePaths
 from .podman import LABEL_PREFIX, Podman
-from .policy import GatewayConfig, encode_snapshot, Allowlist
+from .policy import GatewayConfig, encode_snapshot, Allowlist, is_fixed_protected_address
 from .profiles import Profile, ServerSettings
 
 
@@ -67,9 +67,11 @@ def _host_ips(podman, owned_interfaces):
                 continue
             for address in link.get('addr_info', []):
                 parsed = ipaddress.ip_address(address['local'])
-                # Dynamic veth link-local addresses are covered by the fixed
-                # protected ranges, independent of host discovery.
-                if not parsed.is_link_local:
+                # Other profiles' bridge addresses appear/disappear during
+                # normal lifecycle operations. Static protected ranges already
+                # deny those destinations; fingerprint only additional host
+                # addresses so unrelated profiles cannot invalidate restart.
+                if not is_fixed_protected_address(str(parsed)):
                     result.add(str(parsed))
     return tuple(sorted(result))
 

@@ -150,6 +150,13 @@ def _protected(gateway):
     return tuple(tuple(ipaddress.collapse_addresses(item for item in networks if item.version == version)) for version in (4, 6))
 
 
+def is_fixed_protected_address(address: str) -> bool:
+    """Whether static policy protects this address without host discovery."""
+    parsed = _address(address)
+    ranges = _PROTECTED_V4 if parsed.version == 4 else _PROTECTED_V6
+    return any(parsed in network for network in ranges)
+
+
 def is_protected_address(address: str, gateway: GatewayConfig) -> bool:
     """Return whether a literal is forbidden, even when expressly allowlisted."""
     parsed = _address(address)

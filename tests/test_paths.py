@@ -29,6 +29,28 @@ class StorageTests(unittest.TestCase):
             self.assertFalse(paths.runtime.exists())
             self.assertFalse(paths.logs.exists())
 
+    def test_browser_tmpfs_parent_is_created_before_podman_for_private_and_shared_state(self):
+        with ProfileFixture() as f:
+            for shared in (False, True):
+                profile = f.load('work', {'state': {'share_host_t3_state': shared}})
+                paths = self.paths(f)
+                storage.prepare_home(profile, paths, f.host)
+                t3 = profile.state.t3_directory if shared else paths.home / '.t3'
+                self.assertTrue((t3 / 'tools').is_dir())
+                self.assertEqual((t3 / 'tools').stat().st_uid, paths.home.stat().st_uid)
+
+    def test_browser_tmpfs_parent_rejects_symlink_without_touching_target(self):
+        with ProfileFixture() as f:
+            profile = f.load('work', {'state': {'share_host_t3_state': False}})
+            paths = self.paths(f)
+            (paths.home / '.t3').mkdir(parents=True)
+            target = f.root / 'unrelated-tools'
+            target.mkdir()
+            (paths.home / '.t3/tools').symlink_to(target, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, 'symlink'):
+                storage.prepare_home(profile, paths, f.host)
+            self.assertEqual(list(target.iterdir()), [])
+
     def test_provider_and_t3_sharing_flags_are_independent(self):
         with ProfileFixture() as f:
             for providers in (False, True):

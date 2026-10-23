@@ -344,6 +344,30 @@ class LauncherTests(unittest.TestCase):
         self.assertFalse(list(project.glob('.t3-permission-check.*')))
         self.assertEqual(keep.read_text(), 'untouched')
 
+    def test_restricted_smoke_uses_provider_transport_and_local_ready(self):
+        from t3_sandbox.launcher import Launcher
+        from t3_sandbox.paths import ProfileIdentity
+        from t3_sandbox.podman import Podman
+        self.f.write('work', {'network': {'restricted': True}})
+        # Real smoke orchestration against the existing subprocess fixture;
+        # no gateway lifecycle is necessary for choosing the probe endpoint.
+        curl = self.fake.root / 'curl'
+        curl.write_text('#!/bin/sh\nexit 0\n')
+        curl.chmod(0o755)
+        project = self.f.host.home / 'projects/t3-sandbox/work'
+        project.mkdir(parents=True)
+        self.fake.add_container('t3-sandbox-' + str(os.getuid()) + '-work', uid=str(os.getuid()),
+            mounts=[{'Type': 'bind', 'Source': str(project), 'Destination': '/workspace'}])
+        launcher = Launcher(Podman(), self.f.host, self.f.profile_dir)
+        launcher._smoke(self.f.load('work'), ProfileIdentity('work', os.getuid()))
+        commands = self.fake.calls()
+        text = ' '.join(part for call in commands for part in call)
+        self.assertNotIn('registry.npmjs.org', text)
+        self.assertIn('https://api.openai.com/v1/models', text)
+        self.assertIn('401', text)
+        self.assertIn('403', text)
+        self.assertIn('http://127.0.0.1:3773/', text)
+
     def test_make_firewall_logs_recovers_invalid_yaml_and_preserves_jsonl_stdout(self):
         from t3_sandbox.denials import DenialRecord
         logs = self.f.host.home / '.local/share/t3-sandbox/work/logs'

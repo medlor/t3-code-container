@@ -142,13 +142,15 @@ class Launcher:
             raise ValueError('Duplicate or malformed runtime environment. Run make recreate.')
         if profile.network.restricted:
             identity = ProfileIdentity(profile.name, self.host.uid)
-            private = self.podman.inspect('network', identity.private_network)
-            # Verify against the actual gateway address, not the container's own
-            # environment, which is the value being checked.
+            # Podman clears a stopped gateway's runtime IP. Derive the fixed
+            # endpoint from the owned, validated network so crash recovery can
+            # validate T3's environment before restarting that gateway.
+            _, subnet = network._network(self.podman, identity, identity.private_network, True)
             gateway = self.podman.inspect_owned('container', identity.proxy, identity)
-            address = (gateway or {}).get('NetworkSettings', {}).get('Networks', {}).get(identity.private_network, {}).get('IPAddress')
-            if not private or not address:
-                raise ValueError('Missing browser proxy network. Run make recreate.')
+            address = str(subnet.network_address + 2)
+            actual = (gateway or {}).get('NetworkSettings', {}).get('Networks', {}).get(identity.private_network, {}).get('IPAddress')
+            if not gateway or (gateway.get('State', {}).get('Running') and actual != address):
+                raise ValueError('Missing or changed browser proxy network. Run make recreate.')
             expected = proxy_environment(f'http://{address}:3128')
         else:
             expected = {'T3_SANDBOX_BROWSER_PROXY': ''}
@@ -656,10 +658,19 @@ class Launcher:
         return 0
 
     def _smoke(self, profile, identity):
+        if profile.network.restricted:
+            network_probe = (
+                'status=$(curl --silent --show-error --connect-timeout 5 --max-time 20 '
+                '--output /dev/null --write-out "%{http_code}" https://api.openai.com/v1/models); '
+                'case "$status" in 200|401|403) ;; *) echo "Provider HTTPS transport failed: $status" >&2; exit 1;; esac; ')
+        else:
+            network_probe = ('curl --fail --silent --show-error --connect-timeout 5 --max-time 20 '
+                             '--output /dev/null https://registry.npmjs.org/; ')
         self.podman.run(['exec', identity.container, 'bash', '-ec',
             'test "$(id -u)" != 0; id; node --version; npm --version; codex --version; claude --version; t3 --version; '
-            'python3 --version; uv --version; go version; rustc --version; javac -version; '
-            'curl --fail --silent --show-error --output /dev/null https://registry.npmjs.org/'], capture=False)
+            'python3 --version; uv --version; go version; rustc --version; javac -version; ' +
+            network_probe + 'curl --fail --silent --show-error --noproxy \"*\" --connect-timeout 2 --max-time 5 '
+            '--output /dev/null http://127.0.0.1:3773/'], capture=False)
         probe = self.podman.run(['exec', identity.container, 'mktemp', '/workspace/.t3-permission-check.XXXXXXXX']).stdout.strip()
         if not re.fullmatch(r'/workspace/\.t3-permission-check\.[A-Za-z0-9]+', probe):
             raise ValueError('Unexpected ownership probe path')

@@ -150,6 +150,12 @@ def prepare_home(profile: 'Profile', paths: ProfilePaths, host: HostContext) -> 
     mounts = _mounts(profile, paths, host)
     directories = [source for source, _ in mounts]
     directories.extend(paths.home / leaf for leaf in ('.codex', '.claude', '.t3'))
+    # Podman creates missing tmpfs mount ancestors as container root. Prepare
+    # this parent as the host user before mounting the browser cache beneath it.
+    t3_state = profile.state.t3_directory if profile.state.share_host_t3_state else paths.home / '.t3'
+    if (t3_state / 'tools').is_symlink():
+        raise ValueError('Browser tmpfs parent must not be a symlink')
+    directories.append(t3_state / 'tools')
     for directory in directories:
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     # Return canonical sources, including any safe pre-existing state symlinks.

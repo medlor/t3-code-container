@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from support import ProfileFixture
 from t3_sandbox.network import IsolationError, check_routes
@@ -71,6 +72,9 @@ class NetworkEngine(Podman):
                 output = json.dumps([{'addr_info': self.bridge_addresses}]) if 'dev' in a else json.dumps([
                     {'addr_info': [{'family': 'inet', 'local': '192.168.1.22'},
                                    {'family': 'inet6', 'local': '2001:db8::22'}]}])
+        elif a[0] == 'run' and 'validate' in a:
+            source = next(field[4:] for field in a[a.index('--mount') + 1].split(',') if field.startswith('src='))
+            output = json.dumps({'digest': json.loads((Path(source) / 'active.json').read_bytes())['digest']})
         elif a[0] == 'run':
             name, nets = a[a.index('--name') + 1], {}
             for i, item in enumerate(a):
@@ -425,6 +429,43 @@ class RestrictedNetworkTests(unittest.TestCase):
         self.start()
         self.start()
 
+    def test_other_profile_private_addresses_do_not_invalidate_proxy_restart(self):
+        self.fake.images.update({resource['Id']: resource for resource in self.fake.images.copy().values()})
+        run = self.fake.run
+        addresses = []
+        def with_other_profile(args, **kwargs):
+            result = run(args, **kwargs)
+            if args[:2] == ['unshare', '--rootless-netns'] and args[-3:] == ['ip', '-j', 'addr']:
+                result.stdout = json.dumps(json.loads(result.stdout) + [{'ifname': 'podman999',
+                    'addr_info': [{'local': address} for address in addresses]}])
+            return result
+        self.fake.run = with_other_profile
+        self.start()
+        with patch('t3_sandbox.launcher.subprocess.run', return_value=subprocess.CompletedProcess([], 0)):
+            addresses.extend(['10.231.12.1', 'fd00::1234', '::ffff:10.231.12.1'])
+            self.launcher.proxy_restart('work')
+            addresses.clear()
+            self.launcher.proxy_restart('work')
+
+    def test_new_public_host_addresses_still_reject_proxy_restart_before_stop(self):
+        self.fake.images.update({resource['Id']: resource for resource in self.fake.images.copy().values()})
+        run = self.fake.run
+        addresses = []
+        def with_public_host(args, **kwargs):
+            result = run(args, **kwargs)
+            if args[:2] == ['unshare', '--rootless-netns'] and args[-3:] == ['ip', '-j', 'addr']:
+                result.stdout = json.dumps(json.loads(result.stdout) + [{'ifname': 'public0',
+                    'addr_info': [{'local': address} for address in addresses]}])
+            return result
+        self.fake.run = with_public_host
+        self.start()
+        for address in ('93.184.216.34', '2606:4700:4700::1111'):
+            addresses[:] = [address]
+            self.fake.calls.clear()
+            with self.subTest(address=address), self.assertRaisesRegex(ValueError, 'topology changed'):
+                self.launcher.proxy_restart('work')
+            self.assertFalse(any(call[0] == 'stop' for call in self.fake.calls))
+
     def test_two_profiles_cannot_reuse_one_shared_t3_state(self):
         self.f.write('work', {'state': {'share_host_t3_state': True}})
         self.start()
@@ -562,6 +603,20 @@ class RestrictedNetworkTests(unittest.TestCase):
                         self.start()
                 finally:
                     self.fake.containers[self.identity.container] = original
+
+    def test_browser_environment_validation_allows_owned_stopped_gateway(self):
+        self.start()
+        proxy = self.fake.containers[self.identity.proxy]
+        proxy['State']['Running'] = False
+        proxy['NetworkSettings']['Networks'][self.identity.private_network]['IPAddress'] = ''
+        try:
+            self.launcher._check_browser_runtime(self.f.load('work'), self.fake.containers[self.identity.container])
+        except ValueError as exc:
+            self.fail('Owned stopped gateway must permit proxy recovery: ' + str(exc))
+        # A stopped gateway still cannot make its own environment authoritative.
+        self.fake.containers[self.identity.container]['Config']['Env'] = ['HTTP_PROXY=http://wrong:3128']
+        with self.assertRaisesRegex(ValueError, 'proxy|browser'):
+            self.launcher._check_browser_runtime(self.f.load('work'), self.fake.containers[self.identity.container])
 
     def test_reuse_rejects_missing_browser_tmpfs_and_changed_proxy_environment(self):
         self.start()

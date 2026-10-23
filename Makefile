@@ -34,3 +34,11 @@ help:
 
 init doctor build rebuild start stop restart recreate remove status logs proxy-restart firewall-logs shell exec pair smoke config:
 	@bash scripts/sandbox.sh $@
+
+# Unit discovery deliberately excludes the opt-in integration directory.
+.PHONY: test test-integration
+test:
+	@PYTHONPATH=scripts python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+test-integration:
+	@PYTHONPATH=scripts:tests/integration python3 -m unittest discover -s tests/integration -p 'test_*.py' -v
