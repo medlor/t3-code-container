@@ -71,8 +71,9 @@ class SandboxLab:
     def __enter__(self):
         if not ENABLED:
             raise RuntimeError('Real Podman tests require explicit T3_SANDBOX_INTEGRATION=1')
-        self.temporary = tempfile.TemporaryDirectory(prefix='t3-integration-')
-        self.root = Path(self.temporary.name)
+        # Explicit cleanup keeps backing files available if a container survives.
+        # An automatic TemporaryDirectory finalizer would delete them on GC.
+        self.root = Path(tempfile.mkdtemp(prefix='t3-integration-'))
         self.host = HostContext(self.root / 'host', os.getuid(), os.getgid(), pwd.getpwuid(os.getuid()).pw_name)
         self.host.home.mkdir()
         self.identity = ProfileIdentity('it-' + uuid.uuid4().hex[:12], self.host.uid)
@@ -110,44 +111,79 @@ class SandboxLab:
                 self.gateway = json.loads((self.paths.runtime / 'topology.json').read_text())['gateway']
             print('INTEGRATION fixture ' + self.identity.name + ' ready', flush=True)
             return self
-        except BaseException:
-            self.__exit__(None, None, None)
+        except BaseException as exc:
+            self.__exit__(type(exc), exc, exc.__traceback__)
             raise
 
     def __exit__(self, *args):
         errors = []
-        for proc in reversed(self.processes):
+
+        def attempt(label, action):
             try:
-                os.killpg(proc.pid, signal.SIGTERM)
-                proc.communicate(timeout=5)
+                return True, action()
+            except Exception as exc:
+                errors.append(label + ': ' + type(exc).__name__ + ': ' + str(exc))
+                return False, None
+
+        def signal_helper(proc, sig):
+            try:
+                os.killpg(proc.pid, sig)
             except ProcessLookupError:
                 pass
-            except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
+
+        helpers_stopped = True
+        for proc in reversed(self.processes):
+            stopped, _ = attempt('helper TERM', lambda: signal_helper(proc, signal.SIGTERM))
+            try:
                 proc.communicate(timeout=5)
-        for name in reversed(self.extra_containers):
-            resource = self.podman.inspect('container', name)
-            if resource:
-                assert_owned(resource, self.identity)
-                self.podman.run(['rm', '--force', '--time=1', name])
-        try:
-            self.launcher.dispatch('remove', self.identity.name)
-            for kind, names in [('container', (self.identity.container, self.identity.proxy)),
-                                ('network', (self.identity.private_network, self.identity.external_network))]:
-                for name in names:
-                    if self.podman.inspect(kind, name) is not None:
-                        errors.append(kind + ' ' + name)
-            print('INTEGRATION cleanup ' + self.identity.name + ': ' + ('EMPTY' if not errors else repr(errors)), flush=True)
-        finally:
-            # Homes contain the actual host UID because the workload uses keep-id.
-            # Only this freshly allocated, exact temporary root is eligible.
-            # Podman may have created root-mapped mountpoint ancestors.
-            if self.root.parent != Path(tempfile.gettempdir()) or not self.root.name.startswith('t3-integration-'):
-                raise AssertionError('Refusing nonfixture cleanup')
-            self.podman.run(['unshare', 'rm', '-rf', '--', str(self.root)])
-            self.temporary.cleanup()
+            except Exception as exc:
+                if not isinstance(exc, subprocess.TimeoutExpired):
+                    errors.append('helper wait: ' + type(exc).__name__ + ': ' + str(exc))
+                    stopped = False
+                killed, _ = attempt('helper KILL', lambda: signal_helper(proc, signal.SIGKILL))
+                reaped, _ = attempt('helper reap', lambda: proc.communicate(timeout=5))
+                stopped = stopped and killed and reaped
+            helpers_stopped = helpers_stopped and stopped
+
+        containers = tuple(dict.fromkeys([*reversed(self.extra_containers),
+            self.identity.container, self.identity.proxy]))
+        resources = [('container', name) for name in containers] + [
+            ('network', self.identity.private_network), ('network', self.identity.external_network)]
+        # Teardown bypasses mutation locks: every exact, ownership-checked engine
+        # removal is independently bounded, including after production removal
+        # or helper failure. Lifecycle behavior is exercised in the tests above.
+        for kind, name in resources:
+            def remove(kind=kind, name=name):
+                resource = self.podman.inspect(kind, name)
+                if resource is not None:
+                    assert_owned(resource, self.identity)
+                    command = ['rm', '--force', '--time=1', name] if kind == 'container' else ['network', 'rm', name]
+                    self.podman.run(command, timeout=30)
+            attempt('remove ' + kind + ' ' + name, remove)
+
+        resources_absent = True
+        for kind, name in resources:
+            inspected, resource = attempt('verify ' + kind + ' ' + name,
+                lambda kind=kind, name=name: self.podman.inspect(kind, name))
+            if not inspected or resource is not None:
+                resources_absent = False
+                if inspected:
+                    errors.append('remaining ' + kind + ' ' + name)
+
+        if resources_absent and helpers_stopped:
+            def remove_root():
+                if self.root.parent != Path(tempfile.gettempdir()) or not self.root.name.startswith('t3-integration-'):
+                    raise AssertionError('Refusing nonfixture cleanup')
+                self.podman.run(['unshare', 'rm', '-rf', '--', str(self.root)], timeout=30)
+            attempt('remove fixture root', remove_root)
+        else:
+            errors.append('retained backing root: ' + str(self.root))
+        print('INTEGRATION cleanup ' + self.identity.name + ': ' + ('EMPTY' if not errors else repr(errors)), flush=True)
         if errors:
-            raise AssertionError('Owned test resources remain: ' + ', '.join(errors))
+            failure = AssertionError('Fixture cleanup failed: ' + '; '.join(errors))
+            if len(args) > 1 and args[1] is not None:
+                raise failure from args[1]
+            raise failure
 
     def update(self, values):
         def merge(base, incoming):
