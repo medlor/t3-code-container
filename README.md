@@ -8,13 +8,26 @@ Install the host prerequisites inside WSL2 as your ordinary Linux user:
 
 ```bash
 sudo apt update
-sudo apt install -y podman uidmap slirp4netns fuse-overlayfs make python3 python3-yaml curl
+sudo apt install -y podman uidmap slirp4netns fuse-overlayfs make python3 curl
 podman info --format '{{.Host.Security.Rootless}}' # must print true
 ```
 
-Use distribution Python (`/usr/bin/python3`) if a virtual environment shadows
-`python3` without PyYAML. The launcher never installs host dependencies. Rootless
-Podman needs a free, nonoverlapping subordinate ID range of at least 65536 in
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) as your
+ordinary user if it is not already available:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Ensure `uv` is on your `PATH` (restart your shell after installation).
+`make init` creates a repo-local `.venv` and installs the dependencies pinned in
+`uv.lock`. Python 3.10 or newer is required; uv can download a compatible Python
+if needed. Python packages are installed only in `.venv`, leaving system Python
+unchanged. `make python-env` syncs this environment without creating a profile.
+The launcher and test targets use `uv run --locked`, so no manual activation is
+needed; they also create or update the environment when necessary.
+
+Rootless Podman needs a free, nonoverlapping subordinate ID range of at least 65536 in
 both `/etc/subuid` and `/etc/subgid`; `make doctor` checks this. Never run Make
 with sudo. Enable systemd and cgroup delegation in WSL if resource limits fail.
 
@@ -53,6 +66,19 @@ Connections → Add environment**, and choose `/workspace` for the project.
 Pairing links expire and are single-use. Check `make logs` if startup fails.
 Windows clients normally use WSL localhost forwarding.
 
+To customize the host name shown in T3 Code, set `runtime.hostname` in your
+profile YAML:
+
+```yaml
+runtime:
+  hostname: my-dev-host
+```
+
+Use a DNS hostname with letters, digits, and hyphens (dot-separated labels are
+also supported). Omit the setting or use `null` to keep the generated
+`t3-sandbox-<uid>-<profile>` name. Apply changes with
+`make recreate PROFILE=<profile>`; rebuilding the image is unnecessary.
+
 ## State and authentication
 
 Each profile keeps its home in
@@ -87,8 +113,19 @@ make exec CMD='claude auth login'
 make exec CMD='gh auth login'
 ```
 
-Open the displayed URLs in your normal browser. Use `make shell` for interactive
-flows. For API keys, create a private file outside the mounted project:
+Open the displayed URLs in your normal browser. For Claude subscriptions, run
+`make exec CMD='claude auth login'` from an interactive terminal and sign in with
+your Claude account. If the browser displays a code instead of completing the
+local callback, paste it into the waiting terminal. This is Claude's
+[documented headless login flow](https://code.claude.com/docs/en/authentication#log-in-to-claude-code);
+its CLI does not document a `--device-auth` flag. You can check the result with
+`make exec CMD='claude auth status'`. Credentials saved inside the container
+persist in the provider state directories described above.
+
+An `ANTHROPIC_API_KEY` can take precedence over your Claude subscription; remove
+it from the container environment when using subscription authentication.
+Use `make shell` for other interactive flows.
+For API keys, create a private file outside the mounted project:
 
 ```bash
 install -m 600 /dev/null ~/.config/t3-sandbox/default.env
@@ -115,7 +152,7 @@ make stop
 make start
 make restart
 make remove                       # retains project and persistent home
-make rebuild                      # pull bases and rebuild without cache
+make rebuild                      # pull bases and rebuild without cache using latest T3
 make recreate                     # replace container with current image/settings
 
 make init PROFILE=feature-a
@@ -125,6 +162,11 @@ make start PROFILE=feature-a
 make pair PROFILE=feature-a
 make stop PROFILE=feature-a
 ```
+
+`make rebuild` always installs the latest published T3 release, overriding
+`build.t3_version` for that build without changing the profile. `make build`
+honors the configured version. Run `make recreate` after rebuilding to use the
+new image in the container.
 
 Named initialization reserves port 3773 for `default` and allocates an available
 port from 3774 upward. Each profile selects separate containers, images and

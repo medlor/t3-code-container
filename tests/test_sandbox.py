@@ -47,11 +47,43 @@ class LauncherTests(unittest.TestCase):
         result = self.start()
         self.assertEqual(result.returncode, 0, result.stderr)
         run = self.fake.last_t3_run()
+        self.assertEqual(run[run.index('--hostname') + 1], f't3-sandbox-{os.getuid()}-work')
         self.assertIn('0.0.0.0:3774:3773', run)
         self.assertIn('--network=slirp4netns:allow_host_loopback=false', run)
         self.assertFalse(self.fake.created_proxy_resources())
         self.assertNotIn('--volume', run)
         self.assertTrue(any('src=' + str(self.f.host.home / '.local/share/t3-sandbox/work/home') in item for item in run))
+
+    def test_hostname_change_requires_recreate_and_applies_new_name(self):
+        self.existing()
+        self.f.write('work', {'runtime': {'hostname': 'my-dev-host'}})
+        result = self.run_make('start')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('recreate', result.stderr)
+        result = self.run_make('recreate')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run = self.fake.last_t3_run()
+        self.assertEqual(run[run.index('--hostname') + 1], 'my-dev-host')
+        self.assertEqual(run[run.index('--name') + 1], f't3-sandbox-{os.getuid()}-work')
+
+    def test_rebuild_uses_latest_t3_even_when_profile_pins_a_version(self):
+        self.f.write('work', {'build': {'t3_version': '0.1.0'}})
+        result = self.run_make('rebuild')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        build = next(call for call in self.fake.calls() if call[0] == 'build')
+        self.assertIn('T3_VERSION=latest', build)
+        self.assertNotIn('T3_VERSION=0.1.0', build)
+        self.assertIn('--no-cache', build)
+        self.assertIn('--pull=always', build)
+        self.assertEqual(self.f.load('work').build.t3_version, '0.1.0')
+
+    def test_build_honors_pinned_t3_version(self):
+        self.f.write('work', {'build': {'t3_version': '0.1.0'}})
+        result = self.run_make('build')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        build = next(call for call in self.fake.calls() if call[0] == 'build')
+        self.assertIn('T3_VERSION=0.1.0', build)
+        self.assertNotIn('--no-cache', build)
 
     def test_restricted_build_includes_separate_gateway_image(self):
         self.f.write('work', {'network': {'restricted': True}})

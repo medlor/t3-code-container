@@ -49,6 +49,9 @@ def topology_digest(profile: Profile, paths: ProfilePaths) -> str:
              'server': asdict(profile.server), 'runtime': {
                  'env_file': str(profile.runtime.env_file) if profile.runtime.env_file else None,
                  'automatic_healthcheck': profile.runtime.automatic_healthcheck}}
+    # Preserve existing fingerprints for profiles using the generated hostname.
+    if profile.runtime.hostname is not None:
+        value['runtime']['hostname'] = profile.runtime.hostname
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
@@ -112,7 +115,7 @@ class Launcher:
             raise ValueError('Cannot inspect the shared T3 ownership lock; check state permissions and integrity. Never delete its lock.') from exc
 
     def _validate_start(self, profile, paths):
-        storage.validate_storage(profile, paths, self.host)
+        storage.validate_storage(profile, paths, self.host, warn_skipped=False)
         for source, _ in storage._mounts(profile, paths, self.host):
             if ',' in str(source):
                 raise ValueError(f'Mount path cannot contain commas: {source}')
@@ -128,6 +131,8 @@ class Launcher:
             args.append('--no-cache')
         args += ['-f', str(ROOT / 'Dockerfile'), '-t', identity.image, *self._labels(identity)]
         selectors = {key.upper(): value for key, value in asdict(profile.build).items()}
+        if fresh:
+            selectors['T3_VERSION'] = 'latest'
         selectors.update(HOST_UID=str(self.host.uid), HOST_GID=str(self.host.gid), HOST_USER=self.host.user)
         for key, value in selectors.items():
             args += ['--build-arg', key + '=' + value]
@@ -246,7 +251,7 @@ class Launcher:
     def _create_t3(self, profile, paths, identity, image, *, network_args, publish_args, browser_proxy=None):
         mounts = storage.prepare_home(profile, paths, self.host)
         home = '/home/' + self.host.user
-        args = ['run', '--detach', '--name', identity.container, '--hostname', identity.container,
+        args = ['run', '--detach', '--name', identity.container, '--hostname', profile.runtime.hostname or identity.container,
             *self._labels(identity), '--label', LABEL_PREFIX + 'topology=' + topology_digest(profile, paths),
             '--label', LABEL_PREFIX + 'image-id=' + image['Id'],
             '--userns=keep-id', '--user', f'{self.host.uid}:{self.host.gid}', '--cap-drop=all',

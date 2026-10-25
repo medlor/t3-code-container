@@ -26,6 +26,7 @@ state:
   codex_directory: ~/.codex
   claude_directory: ~/.claude
 runtime:
+  hostname: null # Name shown in T3; null uses t3-sandbox-<uid>-<profile>.
   env_file: null # Optional secret NAME=value file; never sourced as shell.
   automatic_healthcheck: false
 network:

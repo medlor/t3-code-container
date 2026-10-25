@@ -2,3 +2,6 @@
 .env.*
 *.log
 __pycache__/
+.codex/skills/
+.vscode/
+.venv/

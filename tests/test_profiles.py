@@ -16,6 +16,21 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ProfileTests(unittest.TestCase):
+    def test_runtime_hostname_is_optional_and_accepts_dns_names(self):
+        with ProfileFixture() as f:
+            self.assertIsNone(f.load("default").runtime.hostname)
+            for hostname in (None, "my-sandbox", "dev.example.com", "A" * 63):
+                with self.subTest(hostname=hostname):
+                    profile = f.load("work", {"runtime": {"hostname": hostname}})
+                    self.assertEqual(profile.runtime.hostname, hostname)
+
+    def test_runtime_hostname_rejects_invalid_names(self):
+        with ProfileFixture() as f:
+            for hostname in ("", True, 123, "has spaces", "bad_name", "-bad", "bad-",
+                             "a..b", "a.", "a" * 64, ".".join(["a" * 63] * 4), "bad\nname"):
+                with self.subTest(hostname=hostname), self.assertRaisesRegex(ValueError, "runtime.hostname"):
+                    f.load("work", {"runtime": {"hostname": hostname}})
+
     def test_persisted_defaults_and_named_profile(self):
         with ProfileFixture() as f:
             p = load_profile("default", f.profile_dir, f.host)

@@ -1,6 +1,8 @@
 """Persistent storage, protected host paths, and owned resource discovery."""
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from contextlib import redirect_stderr
+import io
 from pathlib import Path
 import subprocess
 import sqlite3
@@ -17,6 +19,54 @@ from t3_sandbox import paths as storage
 class StorageTests(unittest.TestCase):
     def paths(self, fixture, name='work'):
         return storage.profile_paths(storage.ProfileIdentity(name, fixture.host.uid), fixture.profile_dir, fixture.host)
+
+    @unittest.skipIf(os.getuid() == 0, 'Requires filesystem permission enforcement')
+    def test_inaccessible_project_descendants_warn_and_continue_checking_symlinks(self):
+        with ProfileFixture() as f:
+            profile = f.load('work', {})
+            project = profile.project.directory
+            project.mkdir(parents=True)
+            paths = self.paths(f)
+            for mode in (0o000, 0o400):
+                with self.subTest(mode=mode):
+                    blocked = project / 'container-data'
+                    blocked.mkdir()
+                    (blocked / 'session.jsonl').touch()
+                    blocked.chmod(mode)
+                    try:
+                        stderr = io.StringIO()
+                        with redirect_stderr(stderr):
+                            storage.validate_storage(profile, paths, f.host)
+                        self.assertEqual(len(stderr.getvalue().splitlines()), 1)
+                        self.assertIn('Warning:', stderr.getvalue())
+                        self.assertIn(str(project), stderr.getvalue())
+                        link = project / 'policy-link'
+                        link.symlink_to(paths.runtime)
+                        try:
+                            with redirect_stderr(io.StringIO()), self.assertRaisesRegex(ValueError, 'protected'):
+                                storage.validate_storage(profile, paths, f.host)
+                        finally:
+                            link.unlink()
+                    finally:
+                        blocked.chmod(0o700)
+                        (blocked / 'session.jsonl').unlink()
+                        blocked.rmdir()
+
+    @unittest.skipIf(os.getuid() == 0, 'Requires filesystem permission enforcement')
+    def test_permission_errors_remain_fatal_for_project_root_and_provider_state(self):
+        with ProfileFixture() as f:
+            profile = f.load('work', {'state': {'share_host_provider_state': True}})
+            paths = self.paths(f)
+            project = profile.project.directory
+            project.mkdir(parents=True)
+            for blocked in (project, profile.state.claude_directory / 'projects'):
+                blocked.mkdir(parents=True, exist_ok=True)
+                blocked.chmod(0o000)
+                try:
+                    with self.subTest(blocked=blocked), self.assertRaises(PermissionError):
+                        storage.validate_storage(profile, paths, f.host)
+                finally:
+                    blocked.chmod(0o700)
 
     def test_default_shares_original_t3_and_private_profile_has_host_home(self):
         with ProfileFixture() as f:

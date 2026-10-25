@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 try:
     import yaml
 except ImportError as exc:
-    raise ImportError("PyYAML is required: sudo apt install python3-yaml (use distribution Python)") from exc
+    raise ImportError("PyYAML is required: run make python-env and use uv run python scripts/sandbox.py") from exc
 
 from .paths import HostContext, validate_profile_name
 from .policy import Allowlist, normalize_allowlist
@@ -65,6 +65,7 @@ class StateSettings:
 class RuntimeSettings:
     env_file: Path | None
     automatic_healthcheck: bool
+    hostname: str | None
 
 
 @dataclass(frozen=True)
@@ -221,6 +222,12 @@ def decode_profile(data: bytes, *, name: str, source: Path, host: HostContext) -
     pids = resources["pids_limit"]
     if type(pids) is not int or pids < 1:
         raise ValueError("resources.pids_limit must be a positive integer")
+    hostname = runtime["hostname"]
+    if hostname is not None:
+        hostname = _string(hostname, "runtime.hostname")
+        if len(hostname) > 253 or any(not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+                                      for label in hostname.split(".")):
+            raise ValueError("runtime.hostname must be a valid DNS hostname (up to 253 characters, labels up to 63)")
     return Profile(
         name, source, ProjectSettings(_path(project["directory"], "project.directory", host), _bool(project["create_if_missing"], "project.create_if_missing")),
         ServerSettings(bind_address, _port(server["port"], "server.port"), advertised),
@@ -230,7 +237,7 @@ def decode_profile(data: bytes, *, name: str, source: Path, host: HostContext) -
                       _bool(state["share_host_t3_state"], "state.share_host_t3_state"),
                       *(_path(state[key], f"state.{key}", host) for key in ("t3_directory", "codex_directory", "claude_directory"))),
         RuntimeSettings(None if runtime["env_file"] is None else _path(runtime["env_file"], "runtime.env_file", host),
-                        _bool(runtime["automatic_healthcheck"], "runtime.automatic_healthcheck")),
+                        _bool(runtime["automatic_healthcheck"], "runtime.automatic_healthcheck"), hostname),
         NetworkSettings(_bool(network["restricted"], "network.restricted"), normalize_allowlist(Allowlist(
             _list(allow["domains"], "network.allow.domains", _string),
             _list(allow["ips"], "network.allow.ips", _string),

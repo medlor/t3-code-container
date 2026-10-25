@@ -246,6 +246,17 @@ class RestrictedNetworkTests(unittest.TestCase):
     def mutations(self):
         return [a for a in self.fake.calls if a[0] in ('run', 'start') or a[:2] == ['network', 'create']]
 
+    def test_custom_hostname_is_used_in_restricted_mode_and_edits_require_recreate(self):
+        self.f.write('work', {'runtime': {'hostname': 'restricted-dev'}})
+        self.start()
+        run = next(a for a in self.fake.calls if a[0] == 'run' and '--hostname' in a)
+        self.assertEqual(run[run.index('--hostname') + 1], 'restricted-dev')
+        self.f.write('work', {'runtime': {'hostname': 'renamed-dev'}})
+        self.fake.calls.clear()
+        with self.assertRaisesRegex(ValueError, 'recreate'):
+            self.start()
+        self.assertFalse(self.mutations())
+
     def test_restart_rejects_unapplied_configuration_without_stopping_services(self):
         self.start()
         before = deepcopy(self.fake.containers)

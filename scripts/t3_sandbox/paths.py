@@ -5,6 +5,7 @@ import fcntl
 import os
 from pathlib import Path
 import re
+import sys
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -89,7 +90,7 @@ def _mounts(profile: 'Profile', paths: ProfilePaths, host: HostContext) -> list[
     return mounts
 
 
-def validate_storage(profile: 'Profile', paths: ProfilePaths, host: HostContext) -> None:
+def validate_storage(profile: 'Profile', paths: ProfilePaths, host: HostContext, *, warn_skipped=True) -> None:
     """Reject writable binds that expose management files, before creating anything.
 
     Resolve both ends: a runtime directory may itself point into a writable tree.
@@ -130,23 +131,37 @@ def validate_storage(profile: 'Profile', paths: ProfilePaths, host: HostContext)
     for source in sources:
         check(source)
         if source.is_dir():
+            skipped = False
+
             def fail(error):
-                raise error
+                nonlocal skipped
+                if (source != profile.project.directory or
+                        not isinstance(error, PermissionError) or
+                        Path(error.filename) == source):
+                    raise error
+                skipped = True
+
             for root, directories, files in os.walk(source, followlinks=False, onerror=fail):
                 for name in directories + files:
                     child = Path(root) / name
-                    if child.is_symlink():
-                        # Symlinks can refer to files as well as directories.
-                        real = child.resolve()
-                        if sensitive(real):
-                            raise ValueError(f'Writable storage symlink exposes protected host paths: {child}')
+                    try:
+                        if child.is_symlink():
+                            # Symlinks can refer to files as well as directories.
+                            real = child.resolve()
+                            if sensitive(real):
+                                raise ValueError(f'Writable storage symlink exposes protected host paths: {child}')
+                    except PermissionError as error:
+                        fail(error)
+            if skipped and warn_skipped:
+                print(f'Warning: skipped inaccessible project entries while checking storage symlinks: {source}', file=sys.stderr)
     if not profile.project.directory.exists() and not profile.project.create_if_missing:
         raise ValueError(f'Project does not exist and project.create_if_missing is false: {profile.project.directory}')
 
 
 def prepare_home(profile: 'Profile', paths: ProfilePaths, host: HostContext) -> list[tuple[Path, str]]:
     """Prepare ordinary bind directories without copying or changing existing state."""
-    validate_storage(profile, paths, host)
+    # Startup's initial preflight already reports skipped project entries.
+    validate_storage(profile, paths, host, warn_skipped=False)
     mounts = _mounts(profile, paths, host)
     directories = [source for source, _ in mounts]
     directories.extend(paths.home / leaf for leaf in ('.codex', '.claude', '.t3'))

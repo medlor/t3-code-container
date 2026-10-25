@@ -124,7 +124,7 @@ class FakePodman:
         executable.write_text(FAKE_JSON_PODMAN)
         executable.chmod(0o755)
         self.save()
-        self.environment = patch.dict(os.environ, PATH=str(self.root) + ':/usr/bin:/bin',
+        self.environment = patch.dict(os.environ, PATH=str(self.root) + ':' + os.environ.get('PATH', '/usr/bin:/bin'),
                                       CALL_LOG=str(self.log), PODMAN_STATE=str(self.state_file))
         self.environment.start()
         return self
