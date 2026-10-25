@@ -278,7 +278,8 @@ class Launcher:
         else:
             # Our own control variable must not be injected by an env file.
             args += ['--env', 'T3_SANDBOX_BROWSER_PROXY=']
-        self.podman.run([*args, identity.image], capture=False)
+        # First keep-id start may copy/chown every image layer; 30s is far too short.
+        self.podman.run([*args, identity.image], timeout=900, capture=False)
 
     def _atomic(self, path, data, mode):
         temporary = path.with_name(path.name + '.tmp')
