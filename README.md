@@ -1,14 +1,69 @@
-# T3 Code in rootless Podman on WSL2
+# T3 Code in rootless Podman on Linux
 
-Run T3, Codex, Claude Code and their terminal processes in a rootless container.
-The selected project is mounted read/write at `/workspace`. The container uses
-`--userns=keep-id` and your Linux UID/GID, so files it creates belong to you.
+Run T3, Codex, Claude Code and their terminal processes in a rootless container
+on any Linux host: a WSL2 distribution on a Windows PC, a NUC or home server,
+a workstation, or a cloud VM. The selected project is mounted read/write at
+`/workspace`. The container uses `--userns=keep-id` and your Linux UID/GID, so
+files it creates belong to you.
 
-Install the host prerequisites inside WSL2 as your ordinary Linux user:
+## Introduction
+
+Coding agents run shell commands, install packages and edit files on your
+behalf. Running them directly on your machine gives them the same reach as your
+user account: every file in your home, your SSH keys, your keyrings and your
+whole network. This project puts T3 Code and its agents into a hardened,
+rootless Podman container so they only see what you hand them, while staying
+convenient enough for daily use.
+
+**Why use it**
+
+- **Contain the blast radius.** Agents see the mounted project and selected
+  state directories, not your entire home, host sockets or SSH agent.
+- **Run anywhere Linux runs.** Use it in WSL2 on a laptop, or on an always-on
+  NUC or server and connect to it from the T3 desktop app over the network.
+- **No root required.** Rootless Podman with your own UID/GID means no daemon,
+  no `sudo` and no root-owned files in your project.
+- **Reproducible environments.** A single image ships pinned build tooling and
+  a broad toolchain, so every machine and profile behaves the same.
+
+**Key features**
+
+- **Batteries-included image:** Node.js, npm/pnpm/Yarn/Bun, TypeScript, Python/uv,
+  Go, Rust, JDK/Maven, compilers, Git/GitHub CLI, database clients, T3, Codex and
+  Claude Code, plus a preinstalled headless browser.
+- **Multiple profiles:** independent containers, images, ports and persistent
+  homes per project or task (`PROFILE=feature-a`), all configured in YAML.
+- **Optional egress firewall:** restricted networking routes all outbound
+  traffic through an allowlisting gateway with per-profile denial logs, and
+  never falls back to unrestricted access.
+- **Hardened defaults:** all capabilities dropped, `no-new-privileges`, private
+  PID/IPC namespaces, default seccomp and configurable CPU/memory/PID limits.
+- **Flexible credentials:** share your host Codex/Claude/T3 state, or keep
+  private per-profile logins and API keys outside the mounted project.
+- **Simple workflow:** `make init`, `make build`, `make start`, `make pair`, and
+  paste the pairing URL into the T3 desktop app.
+
+## Prerequisites
+
+Install the host prerequisites as your ordinary Linux user (inside the WSL2
+distribution when using Windows). Any reasonably current distribution with
+rootless Podman works; for example:
 
 ```bash
+# Debian / Ubuntu (including WSL2)
 sudo apt update
 sudo apt install -y podman uidmap slirp4netns fuse-overlayfs make python3 curl
+
+# Fedora / RHEL-compatible
+sudo dnf install -y podman shadow-utils slirp4netns fuse-overlayfs make python3 curl
+
+# Arch Linux
+sudo pacman -S --needed podman shadow slirp4netns fuse-overlayfs make python curl
+```
+
+Then confirm that Podman runs rootless:
+
+```bash
 podman info --format '{{.Host.Security.Rootless}}' # must print true
 ```
 
@@ -29,7 +84,8 @@ needed; they also create or update the environment when necessary.
 
 Rootless Podman needs a free, nonoverlapping subordinate ID range of at least 65536 in
 both `/etc/subuid` and `/etc/subgid`; `make doctor` checks this. Never run Make
-with sudo. Enable systemd and cgroup delegation in WSL if resource limits fail.
+with sudo. If resource limits fail, enable systemd and cgroup v2 delegation for
+your user (in WSL2, enable systemd in `/etc/wsl.conf`).
 
 ## First sandbox
 
@@ -56,9 +112,10 @@ settings are no longer read. Existing `.env` files and old Podman resources are
 left in place; migrate their settings manually into a profile.
 
 T3 listens on container port 3773. The default host bind is `0.0.0.0:3774`; host
-port 3773 is left free for a T3 UI running on the host (for example on Windows),
-which WSL port probes cannot detect. This bind can expose the service beyond
-localhost according to WSL/network firewall settings. Set
+port 3773 is left free for a T3 UI running on the host (for example on Windows,
+which WSL port probes cannot detect). This bind exposes the service beyond
+localhost according to your host firewall (or WSL networking) settings; on a
+NUC or server this typically means your LAN. Set
 `server.bind_address: 127.0.0.1` to limit it to host loopback.
 `make pair` preserves the token and rewrites the address to a usable host route;
 wildcard binds use `127.0.0.1` (IPv6 `::` uses `::1`). Set
@@ -66,7 +123,9 @@ wildcard binds use `127.0.0.1` (IPv6 `::` uses `::1`). Set
 reverse proxy. Paste the pairing URL into the T3 desktop app's **Settings →
 Connections → Add environment**, and choose `/workspace` for the project.
 Pairing links expire and are single-use. Check `make logs` if startup fails.
-Windows clients normally use WSL localhost forwarding.
+On WSL2, Windows clients normally use WSL localhost forwarding. On a NUC or
+other remote host, set `server.advertised_url` to an address your client can
+reach (for example `http://nuc.local:3774`) and allow the port in its firewall.
 
 To customize the host name shown in T3 Code, set `runtime.hostname` in your
 profile YAML:
@@ -206,8 +265,8 @@ live in the persistent home and can override image tools on PATH.
 The image includes Node.js, npm/pnpm/Yarn/Bun, TypeScript, T3, Codex, Claude,
 Python/uv, Go, Rust, JDK/Maven, native compilers and debugging tools, Git/GitHub
 CLI, database clients and common terminal tools. Project-specific dependencies
-still need their own installation. Use Linux filesystem paths; Windows mounts
-may have synthesized permissions and slower operations. Supplementary host
+still need their own installation. On WSL2, use Linux filesystem paths; Windows
+mounts may have synthesized permissions and slower operations. Supplementary host
 groups are not passed through.
 
 T3's native release and its required sidecar files are installed under
