@@ -375,7 +375,7 @@ class LauncherTests(unittest.TestCase):
         result = self.run_make('config', profile='default')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue((self.f.profile_dir / 'default.yaml').exists())
-        self.assertIn('3773', result.stdout)
+        self.assertIn('"port": 3774', result.stdout)
         self.assertEqual(self.fake.calls(), [])
 
     def test_smoke_checks_published_http_and_removes_only_its_probe(self):

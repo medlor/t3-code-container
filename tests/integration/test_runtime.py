@@ -99,10 +99,10 @@ class RuntimeTests(unittest.TestCase):
         # This creates YAML only, never a real default engine identity.
         from t3_sandbox.profiles import load_profile, initialize_profile
         default = load_profile('default', self.lab.profile_dir, self.lab.host)
-        self.assertEqual(default.server.port, 3773)
+        self.assertEqual(default.server.port, 3774)
         self.assertTrue(default.state.share_host_t3_state)
         path = initialize_profile('it-initialization', self.lab.profile_dir, self.lab.host)
-        self.assertNotEqual(load_profile('it-initialization', self.lab.profile_dir, self.lab.host).server.port, 3773)
+        self.assertNotIn(load_profile('it-initialization', self.lab.profile_dir, self.lab.host).server.port, (3773, 3774))
 
 
 @unittest.skipUnless(ENABLED, 'set T3_SANDBOX_INTEGRATION=1 for disposable real Podman tests')

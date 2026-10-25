@@ -116,9 +116,8 @@ class BrowserAssetsTests(unittest.TestCase):
 
     def test_browser_cache_mount_is_only_cache_subtree(self):
         with ProfileFixture() as fixture:
-            profile = fixture.load('work', {})
             self.assertTrue(hasattr(launcher, 'browser_cache_mount'), 'missing browser cache mount')
-            self.assertEqual(launcher.browser_cache_mount(profile, fixture.host),
+            self.assertEqual(launcher.browser_cache_mount(fixture.host),
                 ['--tmpfs', '/home/testuser/.t3/tools/chrome-headless-shell:rw,nosuid,nodev,exec,mode=1777,notmpcopyup'])
 
     def test_runtime_env_file_cannot_override_selected_proxy(self):

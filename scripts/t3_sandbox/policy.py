@@ -1,6 +1,8 @@
 """Strict data-only policy compiler shared by host orchestration and gateway.
 
-Squid restricts names; nft independently restricts actual destination addresses.
+Squid enforces the domain/IP allowlist; nft independently blocks protected
+destination addresses and unlisted ports, but permits Squid to reach any other
+public address on allowed ports (resolved domain addresses are not pinned).
 The policy digest identifies the allowlist, not topology or daemon identities.
 Operational external subnets and resolvers are IPv4-only in this version. IPv6
 allowlist parsing, host-address protection, and mapped-address denial remain

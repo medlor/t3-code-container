@@ -25,7 +25,7 @@ from .denials import read_denials
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def browser_cache_mount(profile: Profile, host: HostContext) -> list[str]:
+def browser_cache_mount(host: HostContext) -> list[str]:
     return ['--tmpfs', f'/home/{host.user}/.t3/tools/chrome-headless-shell:rw,nosuid,nodev,exec,mode=1777,notmpcopyup']
 
 
@@ -145,7 +145,7 @@ class Launcher:
                             *self._labels(identity, role='proxy'), str(ROOT)], timeout=3600, capture=False)
 
     def _check_browser_runtime(self, profile, resource):
-        specification = browser_cache_mount(profile, self.host)[1]
+        specification = browser_cache_mount(self.host)[1]
         target, options = specification.split(':', 1)
         mounts = resource.get('HostConfig', {}).get('Tmpfs') or {}
         actual = set(mounts.get(target, '').split(','))
@@ -261,7 +261,7 @@ class Launcher:
             '--env', 'HOME=' + home, '--workdir', '/workspace']
         for source, destination in mounts:
             args += ['--mount', f'type=bind,src={source},dst={destination}']
-        args += browser_cache_mount(profile, self.host)
+        args += browser_cache_mount(self.host)
         if not profile.runtime.automatic_healthcheck:
             args.append('--no-healthcheck')
         for key in ('memory', 'cpus'):
@@ -297,7 +297,7 @@ class Launcher:
         expected_mounts = {(str(source.resolve()), destination, not proxy or destination != '/run/t3-policy')
             for source, destination in ([(paths.runtime / 'policy', '/run/t3-policy'), (paths.logs, '/var/log/t3-proxy')]
                 if proxy else storage._mounts(profile, paths, self.host))}
-        browser_target = None if proxy else browser_cache_mount(profile, self.host)[1].split(':', 1)[0]
+        browser_target = None if proxy else browser_cache_mount(self.host)[1].split(':', 1)[0]
         actual_mounts = {(m.get('Source'), m.get('Destination'), m.get('RW'))
             for m in resource.get('Mounts', [])
             if not (not proxy and m.get('Type') == 'tmpfs' and m.get('Destination') == browser_target)}

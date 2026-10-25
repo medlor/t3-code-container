@@ -2,7 +2,8 @@
 name = "t3-sandbox"
 version = "0.1.0"
 description = "Host scripts for the T3 Code sandbox"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
+license = "MIT"
 dependencies = ["PyYAML>=6.0,<7"]
 
 [tool.uv]

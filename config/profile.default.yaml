@@ -6,7 +6,7 @@ project:
   create_if_missing: true
 server:
   bind_address: 0.0.0.0
-  port: 3773
+  port: 3774 # 3773 is left for a host T3 UI
   advertised_url: null
 build:
   ubuntu_image: docker.io/library/ubuntu:rolling

@@ -2,7 +2,7 @@
 ARG UBUNTU_IMAGE=docker.io/library/ubuntu:rolling
 ARG NODE_IMAGE=docker.io/library/node:24-bookworm-slim
 FROM ${NODE_IMAGE} AS node
-FROM ghcr.io/astral-sh/uv:latest AS uv
+FROM ghcr.io/astral-sh/uv:0.13.5 AS uv
 FROM ${UBUNTU_IMAGE}
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -33,9 +33,10 @@ COPY --from=uv /uv /uvx /usr/local/bin/
 ARG CODEX_VERSION=latest
 ARG T3_VERSION=latest
 ARG CLAUDE_VERSION=latest
+# Agent CLIs follow profile selectors; general tooling is pinned for reproducibility.
 RUN npm install -g --allow-scripts=bun,pnpm,yarn,esbuild \
     "@openai/codex@${CODEX_VERSION}" "t3@${T3_VERSION}" \
-    pnpm yarn bun typescript tsx \
+    pnpm@12.15.0 yarn@1.22.22 bun@1.4.4 typescript@7.0.2 tsx@4.23.15 \
     && npm cache clean --force
 # Use Claude's native installer; copy its actual executable outside /root.
 RUN curl -fsSL https://claude.ai/install.sh -o /tmp/install-claude.sh \

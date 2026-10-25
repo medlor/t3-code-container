@@ -1,7 +1,30 @@
+# Local configuration and secrets
 .env
 .env.*
-*.log
+
+# Python
 __pycache__/
-.codex/skills/
-.vscode/
+*.py[cod]
 .venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Logs (test fixtures are intentional Squid log captures)
+*.log
+!tests/fixtures/*.log
+
+# Agent/tool working state (skills, session keys, browser captures)
+.agent/
+.codex/
+.claude/
+.superpowers/
+.playwright-mcp/
+
+# Editors and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store

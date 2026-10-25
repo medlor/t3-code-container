@@ -19,6 +19,10 @@ from .paths import HostContext, validate_profile_name
 from .policy import Allowlist, normalize_allowlist
 
 MAX_PROFILE_BYTES = 1024 * 1024
+# T3's own default port, usually taken by a host/Windows T3 UI. WSL bind probes
+# cannot observe Windows listeners, so never allocate it to a sandbox.
+HOST_T3_PORT = 3773
+DEFAULT_PROFILE_PORT = 3774
 MAX_MANAGEMENT_PORT = 65535
 _TEMPLATE = Path(__file__).resolve().parents[2] / "config/profile.default.yaml"
 
@@ -258,16 +262,24 @@ def _port_available(port: int) -> bool:
     return True
 
 
-def _allocate_port(profile_dir: Path, host: HostContext) -> int:
-    # Reserve the fixed default port even if a named profile is initialized first.
-    used = {3773}
+def _allocate_port(profile_dir: Path) -> int:
+    # Reserve the host T3 port and the default profile's port, even if a named
+    # profile is initialized before default.
+    used = {HOST_T3_PORT, DEFAULT_PROFILE_PORT}
     for path in profile_dir.glob("*.yaml"):
-        profile = decode_profile(_read_profile(path), name=path.stem, source=path, host=host)
-        used.add(profile.server.port)
-    for port in range(3773, MAX_MANAGEMENT_PORT + 1):
+        # An invalid sibling profile must not block initializing another one.
+        # Still reserve its port when that single field is readable.
+        try:
+            server = _read_yaml(_read_profile(path)).get("server")
+        except (OSError, ValueError):
+            continue
+        port = server.get("port") if isinstance(server, dict) else None
+        if type(port) is int:
+            used.add(port)
+    for port in range(DEFAULT_PROFILE_PORT + 1, MAX_MANAGEMENT_PORT + 1):
         if port not in used and _port_available(port):
             return port
-    raise ValueError("No unused management port available from 3773 to 65535")
+    raise ValueError(f"No unused management port available from {DEFAULT_PROFILE_PORT + 1} to {MAX_MANAGEMENT_PORT}")
 
 
 def initialize_profile(name: str, profile_dir: Path, host: HostContext) -> Path:
@@ -284,7 +296,7 @@ def initialize_profile(name: str, profile_dir: Path, host: HostContext) -> Path:
         if name != "default":
             content = content.replace("~/projects/t3-sandbox/default", f"~/projects/t3-sandbox/{name}")
             content = content.replace("share_host_t3_state: true", "share_host_t3_state: false")
-            content = content.replace("  port: 3773", f"  port: {_allocate_port(profile_dir, host)}")
+            content = content.replace(f"  port: {DEFAULT_PROFILE_PORT}", f"  port: {_allocate_port(profile_dir)}")
         temporary = None
         try:
             with tempfile.NamedTemporaryFile(dir=profile_dir, prefix=".profile-", delete=False) as stream:

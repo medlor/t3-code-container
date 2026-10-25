@@ -36,7 +36,7 @@ class ProfileTests(unittest.TestCase):
             p = load_profile("default", f.profile_dir, f.host)
             self.assertTrue(p.source.is_file())
             self.assertFalse(p.network.restricted)
-            self.assertEqual((p.server.bind_address, p.server.port), ("0.0.0.0", 3773))
+            self.assertEqual((p.server.bind_address, p.server.port), ("0.0.0.0", 3774))
             self.assertTrue(p.state.share_host_t3_state)
             self.assertTrue(p.state.share_host_provider_state)
             self.assertEqual(p.project.directory, f.host.home / "projects/t3-sandbox/default")
@@ -71,7 +71,7 @@ class ProfileTests(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=2) as pool:
                 paths = list(pool.map(lambda _: initialize(), range(2)))
             self.assertEqual(paths[0], paths[1])
-            self.assertEqual(f.load("default").server.port, 3773)
+            self.assertEqual(f.load("default").server.port, 3774)
             edited = b"version: 1\nserver:\n  port: 43781\n# user comment\n"
             paths[0].write_bytes(edited)
             with ThreadPoolExecutor(max_workers=2) as pool:
@@ -84,9 +84,19 @@ class ProfileTests(unittest.TestCase):
             with patch("t3_sandbox.profiles._port_available", return_value=True):
                 initialize_profile("work", f.profile_dir, f.host)
             default = f.load("default")
-            self.assertEqual(default.server.port, 3773)
-            self.assertEqual(f.load("work").server.port, 3774)
+            self.assertEqual(default.server.port, 3774)
+            # 3773 stays free for a host T3 UI, even when the probe sees it as available.
+            self.assertEqual(f.load("work").server.port, 3775)
             self.assertNotEqual(f.load("work").server.port, default.server.port)
+
+    def test_invalid_sibling_profile_does_not_block_init_but_keeps_its_port(self):
+        with ProfileFixture() as f:
+            f.profile_dir.mkdir(parents=True, exist_ok=True)
+            (f.profile_dir / "broken.yaml").write_text("server:\n  port: 3775\n  unknown: 1\n")
+            (f.profile_dir / "garbage.yaml").write_text("{ not yaml")
+            with patch("t3_sandbox.profiles._port_available", return_value=True):
+                initialize_profile("work", f.profile_dir, f.host)
+            self.assertEqual(f.load("work").server.port, 3776)
 
     def test_concurrent_named_profile_ports_are_unique(self):
         with ProfileFixture() as f:
@@ -99,12 +109,12 @@ class ProfileTests(unittest.TestCase):
     def test_named_profile_avoids_host_ipv4_listener(self):
         with ProfileFixture() as f, socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
             try:
-                listener.bind(("127.0.0.1", 3774))
+                listener.bind(("127.0.0.1", 3775))
                 listener.listen()
             except OSError:
-                self.skipTest("3774 already in use on this host")
+                self.skipTest("3775 already in use on this host")
             initialize_profile("work", f.profile_dir, f.host)
-            self.assertGreater(f.load("work").server.port, 3774)
+            self.assertGreater(f.load("work").server.port, 3775)
 
     def test_missing_named_profile_does_not_create_file(self):
         with ProfileFixture() as f:
@@ -201,7 +211,7 @@ class ProfileTests(unittest.TestCase):
                     p = f.load("default")
             finally:
                 os.chdir(previous)
-            self.assertEqual(p.server.port, 3773)
+            self.assertEqual(p.server.port, 3774)
             self.assertEqual(p.state.t3_directory, f.host.home / ".t3")
             self.assertFalse(marker.exists())
 
@@ -220,7 +230,7 @@ class ProfileTests(unittest.TestCase):
     def test_port_exhaustion_does_not_publish_partial_profile(self):
         with ProfileFixture() as f:
             f.load("default")
-            with patch("t3_sandbox.profiles.MAX_MANAGEMENT_PORT", 3773):
+            with patch("t3_sandbox.profiles.MAX_MANAGEMENT_PORT", 3774):
                 with self.assertRaisesRegex(ValueError, "No unused management port"):
                     initialize_profile("work", f.profile_dir, f.host)
             self.assertFalse((f.profile_dir / "work.yaml").exists())

@@ -21,7 +21,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 Ensure `uv` is on your `PATH` (restart your shell after installation).
 `make init` creates a repo-local `.venv` and installs the dependencies pinned in
-`uv.lock`. Python 3.10 or newer is required; uv can download a compatible Python
+`uv.lock`. Python 3.11 or newer is required; uv can download a compatible Python
 if needed. Python packages are installed only in `.venv`, leaving system Python
 unchanged. `make python-env` syncs this environment without creating a profile.
 The launcher and test targets use `uv run --locked`, so no manual activation is
@@ -55,9 +55,11 @@ comes exclusively from the selected YAML file; legacy `.env` and `SANDBOX`
 settings are no longer read. Existing `.env` files and old Podman resources are
 left in place; migrate their settings manually into a profile.
 
-T3 listens on container port 3773. The default host bind is `0.0.0.0:3773`, which
-can expose the service beyond localhost according to WSL/network firewall
-settings. Set `server.bind_address: 127.0.0.1` to limit it to host loopback.
+T3 listens on container port 3773. The default host bind is `0.0.0.0:3774`; host
+port 3773 is left free for a T3 UI running on the host (for example on Windows),
+which WSL port probes cannot detect. This bind can expose the service beyond
+localhost according to WSL/network firewall settings. Set
+`server.bind_address: 127.0.0.1` to limit it to host loopback.
 `make pair` preserves the token and rewrites the address to a usable host route;
 wildcard binds use `127.0.0.1` (IPv6 `::` uses `::1`). Set
 `server.advertised_url` when clients need another address, for example an HTTPS
@@ -168,8 +170,8 @@ make stop PROFILE=feature-a
 honors the configured version. Run `make recreate` after rebuilding to use the
 new image in the container.
 
-Named initialization reserves port 3773 for `default` and allocates an available
-port from 3774 upward. Each profile selects separate containers, images and
+Named initialization never allocates host port 3773 (host T3 UI), reserves 3774
+for `default`, and allocates an available port from 3775 upward. Each profile selects separate containers, images and
 persistent homes. Providers remain shared by default; disable sharing for
 independent credentials. Sharing a project shares its actual files. Isolation
 is per container/environment; T3 threads within an environment share its mounts
