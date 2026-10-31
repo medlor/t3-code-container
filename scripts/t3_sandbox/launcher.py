@@ -705,7 +705,12 @@ class Launcher:
                 if command == 'exec' and not cmd:
                     raise ValueError('Usage: make exec CMD="codex login --device-auth"')
                 tty = ['-i'] + (['-t'] if sys.stdin.isatty() and sys.stdout.isatty() else [])
-                self.podman.run(['exec', *tty, identity.container, *(['bash'] if command == 'shell' else ['bash', '-c', cmd])], timeout=None, capture=False)
+                # The session's exit status is the user's, not a Podman failure (e.g. 130 after Ctrl-C).
+                # Podman's own failures use 125-127 and still surface as errors.
+                result = self.podman.run(['exec', *tty, identity.container, *(['bash'] if command == 'shell' else ['bash', '-c', cmd])], check=False, timeout=None, capture=False)
+                if result.returncode in (125, 126, 127):
+                    result.check_returncode()
+                return result.returncode
             elif command == 'pair':
                 result = self.podman.run(['exec', identity.container, 't3', 'pair'])
                 subprocess.run([sys.executable, str(ROOT / 'scripts/pair-url.py'), self._endpoint(profile)], input=result.stdout, text=True, check=True)
