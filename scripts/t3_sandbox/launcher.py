@@ -42,6 +42,10 @@ def topology_digest(profile: Profile, paths: ProfilePaths) -> str:
     mounts = [('home', str(paths.home.resolve())), ('workspace', str(profile.project.directory.resolve()))]
     if profile.state.share_host_provider_state:
         mounts.extend((leaf, str(getattr(profile.state, leaf + '_directory').resolve())) for leaf in ('codex', 'claude'))
+    if profile.state.share_host_gh_state:
+        mounts.append(('gh', str(profile.state.gh_directory.resolve())))
+        if profile.state.gitconfig_file.exists():
+            mounts.append(('gitconfig', str(profile.state.gitconfig_file.resolve())))
     if profile.state.share_host_t3_state:
         mounts.append(('t3', str(profile.state.t3_directory.resolve())))
     value = {'browser_cache_contract': 1, 'proxy_environment_contract': 1, 'mounts': mounts, 'resources': asdict(profile.resources),
@@ -121,6 +125,11 @@ class Launcher:
                 raise ValueError(f'Mount path cannot contain commas: {source}')
             if source.exists() and not os.access(source, os.R_OK | os.W_OK | os.X_OK):
                 raise ValueError(f'Storage is not readable and writable: {source}')
+        for source, _ in storage.readonly_mounts(profile, self.host):
+            if ',' in str(source):
+                raise ValueError(f'Mount path cannot contain commas: {source}')
+            if not os.access(source, os.R_OK):
+                raise ValueError(f'Read-only mount is not readable: {source}')
         if profile.runtime.env_file and not profile.runtime.env_file.is_file():
             raise ValueError(f'Runtime env file not found: {profile.runtime.env_file}')
         storage.validate_t3_state_sharing(profile, paths, self.host, self.podman)
@@ -178,7 +187,8 @@ class Launcher:
         bindings = published_bindings(resource).get('3773/tcp', [])
         wanted = [{'HostIp': profile.server.bind_address, 'HostPort': str(profile.server.port)}]
         actual = {(m['Source'], m['Destination']) for m in resource.get('Mounts', []) if m.get('Type') == 'bind'}
-        expected = {(str(source.resolve()), destination) for source, destination in storage._mounts(profile, paths, self.host)}
+        expected = {(str(source.resolve()), destination) for source, destination in
+                    storage._mounts(profile, paths, self.host) + storage.readonly_mounts(profile, self.host)}
         identity = ProfileIdentity(profile.name, self.host.uid)
         image = self.podman.inspect_owned('image', identity.image, identity)
         if (image is None or resource.get('Image') != image['Id'] or bindings != wanted or actual != expected or
@@ -261,6 +271,8 @@ class Launcher:
             '--env', 'HOME=' + home, '--workdir', '/workspace']
         for source, destination in mounts:
             args += ['--mount', f'type=bind,src={source},dst={destination}']
+        for source, destination in storage.readonly_mounts(profile, self.host):
+            args += ['--mount', f'type=bind,src={source},dst={destination},ro']
         args += browser_cache_mount(self.host)
         if not profile.runtime.automatic_healthcheck:
             args.append('--no-healthcheck')
@@ -298,6 +310,9 @@ class Launcher:
         expected_mounts = {(str(source.resolve()), destination, not proxy or destination != '/run/t3-policy')
             for source, destination in ([(paths.runtime / 'policy', '/run/t3-policy'), (paths.logs, '/var/log/t3-proxy')]
                 if proxy else storage._mounts(profile, paths, self.host))}
+        if not proxy:
+            expected_mounts |= {(str(source), destination, False)
+                                for source, destination in storage.readonly_mounts(profile, self.host)}
         browser_target = None if proxy else browser_cache_mount(self.host)[1].split(':', 1)[0]
         actual_mounts = {(m.get('Source'), m.get('Destination'), m.get('RW'))
             for m in resource.get('Mounts', [])

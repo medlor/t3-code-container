@@ -52,6 +52,11 @@ COPY --chmod=755 scripts/browser-launcher.sh /usr/local/libexec/t3-browser-launc
 RUN python3 /usr/local/lib/t3-sandbox/install-t3-browser.py \
     --t3 /usr/local/bin/t3 --destination /opt/t3-browser
 COPY scripts/t3_sandbox/browser.py /usr/local/lib/t3-sandbox/browser.py
+# HTTPS git operations authenticate through gh (shared hosts.yml or GH_TOKEN).
+RUN for host in github.com gist.github.com; do \
+      git config --system "credential.https://${host}.helper" '' \
+      && git config --system --add "credential.https://${host}.helper" '!/usr/bin/gh auth git-credential'; \
+    done
 
 ARG HOST_USER=developer
 ARG HOST_UID=1000

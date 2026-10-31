@@ -174,6 +174,9 @@ make exec CMD='claude auth login'
 make exec CMD='gh auth login'
 ```
 
+For a private GitHub login, also set `state.share_host_gh_state: false`, or use
+a fine-grained `GH_TOKEN` (see [GitHub CLI and git push](#github-cli-and-git-push)).
+
 Open the displayed URLs in your normal browser. For Claude subscriptions, run
 `make exec CMD='claude auth login'` from an interactive terminal and sign in with
 your Claude account. If the browser displays a code instead of completing the
@@ -197,6 +200,69 @@ Set `runtime.env_file: ~/.config/t3-sandbox/default.env` in the profile, then
 recreate. It uses Podman's `NAME=value` format without shell expansion. Secrets
 enter the container environment, never image build arguments; `make config`
 prints only the file path, never its contents.
+
+### GitHub CLI and git push
+
+`state.share_host_gh_state` (default true) shares your host GitHub login and
+git configuration:
+
+| Host source (profile field) | Container path | Access |
+| --- | --- | --- |
+| `~/.config/gh` (`state.gh_directory`) | `~/.config/gh` | read/write |
+| `~/.gitconfig` (`state.gitconfig_file`) | `~/.gitconfig` | read-only, only if the file exists |
+
+The image sets git's system credential helper to `gh auth git-credential` for
+`github.com` and `gist.github.com`, so `git push`/`fetch` over HTTPS use the
+same token as `gh`. Your host identity (`user.name`, `user.email`) and other
+settings come from the read-only `~/.gitconfig`; `git config --global` cannot
+change it inside the container. Use repository-level `git config` for local
+overrides. Files referenced by `include.path` or `core.excludesFile` are not
+mounted. Creating or removing the host `~/.gitconfig` later requires
+`make recreate`.
+
+**Where the token comes from.** `gh` uses the first of these that is set:
+
+1. `GH_TOKEN`, then `GITHUB_TOKEN`, from the container environment;
+2. `oauth_token` in `~/.config/gh/hosts.yml`, which is your host login when
+   sharing is enabled.
+
+The host login works only if its token is stored in `hosts.yml`. Run
+`gh auth status` on the host: it should report
+`Logged in to github.com account ... (~/.config/gh/hosts.yml)`. Keyring
+logins are not available in the container, because OS keyrings are not mounted.
+
+**Explicit, fine-grained token (recommended).** Container processes, including
+agents, can read and use whatever token they get. Your host login usually has
+access to all of your repositories. To limit this, create a
+[fine-grained personal access token](https://github.com/settings/personal-access-tokens/new)
+for the sandbox only. Restrict it to the selected repositories and grant
+*Contents: Read and write* (for push), plus *Pull requests* or *Issues* if `gh`
+should manage them; add an expiry. Put it in the profile's env file:
+
+```bash
+(umask 077 && touch ~/.config/t3-sandbox/default.env)  # keeps existing entries
+nano ~/.config/t3-sandbox/default.env                   # add GH_TOKEN=github_pat_...
+```
+
+```yaml
+runtime:
+  env_file: ~/.config/t3-sandbox/default.env
+state:
+  share_host_gh_state: false # optional: keep the host token out entirely
+```
+
+Then run `make recreate`. `GH_TOKEN` takes precedence over a shared
+`hosts.yml`, so it also works with sharing enabled. Sharing still mounts the
+host token file, though, so disable sharing to keep the broader host token
+completely out of the container. With sharing disabled, `~/.gitconfig` is not
+mounted either; set your identity with
+`make exec CMD='git config --global user.name "Your Name"'` (and
+`user.email`). It persists in the profile home. Verify with
+`make exec CMD='gh auth status'`.
+
+SSH remotes are not supported because no SSH agent or keys are mounted, and
+restricted mode allows HTTPS only. Switch a remote with
+`git remote set-url origin https://github.com/<owner>/<repo>.git`.
 
 ## Daily use and multiple profiles
 
@@ -329,6 +395,9 @@ and leaves containers running. Diagnostics use stderr. This is a proxy-policy
 log: direct attempts that fail locally because T3 has no route never reach it.
 Stop shuts down T3 before the gateway. Remove preserves persistent homes and logs.
 Restricted mode never falls back to unrestricted networking.
+For `gh` and git over HTTPS in restricted mode, add `github.com` and
+`api.github.com` to `network.allow.domains` (plus `codeload.github.com` and
+`objects.githubusercontent.com` for archives and release downloads).
 The restricted-mode compiler currently supports only IPv4 external subnets and
 DNS resolvers, and rejects IPv6 or mixed operational topology. IPv6-only
 resolvers and upstream services are unavailable in this version. IPv6

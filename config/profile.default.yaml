@@ -25,6 +25,11 @@ state:
   t3_directory: ~/.t3
   codex_directory: ~/.codex
   claude_directory: ~/.claude
+  # Share the host GitHub CLI login (hosts.yml token) for gh and git push,
+  # plus the host git configuration read-only when that file exists.
+  share_host_gh_state: true
+  gh_directory: ~/.config/gh
+  gitconfig_file: ~/.gitconfig
 runtime:
   hostname: null # Name shown in T3; null uses t3-sandbox-<uid>-<profile>.
   env_file: null # Optional secret NAME=value file; never sourced as shell.

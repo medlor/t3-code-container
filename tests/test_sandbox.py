@@ -135,10 +135,34 @@ class LauncherTests(unittest.TestCase):
         args = self.fake.last_t3_run()
         self.assertIn('--no-healthcheck', args)
         mounts = [args[i + 1] for i, arg in enumerate(args) if arg == '--mount']
-        self.assertEqual(len(mounts), 4)
+        self.assertEqual(len(mounts), 5)
         self.assertTrue(any(m.endswith('/.codex') for m in mounts))
+        self.assertTrue(any(m.endswith('/.config/gh') for m in mounts))
         self.assertTrue(any(m.endswith('/.claude') for m in mounts))
         self.assertFalse(any(m.endswith('/.t3') for m in mounts))
+
+    def test_gh_sharing_mounts_existing_gitconfig_read_only(self):
+        gitconfig = self.f.host.home / '.gitconfig'
+        gitconfig.write_text('[user]\n\tname = Test\n')
+        container = self.existing()
+        home = self.f.host.home / '.local/share/t3-sandbox/work/home'
+        self.assertIn({'Type': 'bind', 'Source': str(gitconfig), 'Destination': f'/home/{self.f.host.user}/.gitconfig', 'RW': False},
+                      container['Mounts'])
+        self.assertTrue((home / '.gitconfig').is_file())
+        self.assertEqual(gitconfig.read_text(), '[user]\n\tname = Test\n')
+        self.f.write('work', {'server': {'port': 3774}, 'state': {'share_host_gh_state': False}})
+        result = self.run_make('start')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('recreate', result.stderr)
+        self.assertEqual(self.run_make('recreate').returncode, 0)
+        mounts = [m for i, m in enumerate(self.fake.last_t3_run()) if self.fake.last_t3_run()[i - 1] == '--mount']
+        self.assertFalse(any('/.gitconfig' in m or '/.config/gh' in m for m in mounts))
+
+    def test_missing_gitconfig_is_not_mounted(self):
+        result = self.start()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(any('.gitconfig' in item for item in self.fake.last_t3_run()))
+        self.assertFalse((self.f.host.home / '.gitconfig').exists())
 
     def test_stop_and_status_work_with_invalid_whitelist(self):
         self.existing()

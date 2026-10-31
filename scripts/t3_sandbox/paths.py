@@ -85,8 +85,18 @@ def _mounts(profile: 'Profile', paths: ProfilePaths, host: HostContext) -> list[
     if profile.state.share_host_provider_state:
         mounts.extend([(profile.state.codex_directory, f'{home}/.codex'),
                        (profile.state.claude_directory, f'{home}/.claude')])
+    if profile.state.share_host_gh_state:
+        mounts.append((profile.state.gh_directory, f'{home}/.config/gh'))
     if profile.state.share_host_t3_state:
         mounts.append((profile.state.t3_directory, f'{home}/.t3'))
+    return mounts
+
+
+def readonly_mounts(profile: 'Profile', host: HostContext) -> list[tuple[Path, str]]:
+    """Read-only host files; an absent optional file is simply not mounted."""
+    mounts = []
+    if profile.state.share_host_gh_state and profile.state.gitconfig_file.exists():
+        mounts.append((profile.state.gitconfig_file.resolve(), f'/home/{host.user}/.gitconfig'))
     return mounts
 
 
@@ -108,7 +118,7 @@ def validate_storage(profile: 'Profile', paths: ProfilePaths, host: HostContext,
     sources = [source for source, _ in _mounts(profile, paths, host)]
     # Even shared modes retain private state in the persistent home. Validate
     # these targets too so creating them cannot follow a link into runtime/logs.
-    sources.extend(paths.home / leaf for leaf in ('.codex', '.claude', '.t3'))
+    sources.extend(paths.home / leaf for leaf in ('.codex', '.claude', '.t3', '.config/gh'))
 
     def sensitive(real):
         targets = protected
@@ -154,6 +164,12 @@ def validate_storage(profile: 'Profile', paths: ProfilePaths, host: HostContext,
                         fail(error)
             if skipped and warn_skipped:
                 print(f'Warning: skipped inaccessible project entries while checking storage symlinks: {source}', file=sys.stderr)
+    for source, _ in readonly_mounts(profile, host):
+        if not source.is_file() or sensitive(source):
+            raise ValueError(f'Read-only mount must be a regular file outside protected host paths: {source}')
+    gitconfig = paths.home / '.gitconfig'
+    if gitconfig.is_symlink() or (gitconfig.exists() and not gitconfig.is_file()):
+        raise ValueError(f'Persistent home .gitconfig must be a regular file: {gitconfig}')
     if not profile.project.directory.exists() and not profile.project.create_if_missing:
         raise ValueError(f'Project does not exist and project.create_if_missing is false: {profile.project.directory}')
 
@@ -164,7 +180,7 @@ def prepare_home(profile: 'Profile', paths: ProfilePaths, host: HostContext) -> 
     validate_storage(profile, paths, host, warn_skipped=False)
     mounts = _mounts(profile, paths, host)
     directories = [source for source, _ in mounts]
-    directories.extend(paths.home / leaf for leaf in ('.codex', '.claude', '.t3'))
+    directories.extend(paths.home / leaf for leaf in ('.codex', '.claude', '.t3', '.config/gh'))
     # Podman creates missing tmpfs mount ancestors as container root. Prepare
     # this parent as the host user before mounting the browser cache beneath it.
     t3_state = profile.state.t3_directory if profile.state.share_host_t3_state else paths.home / '.t3'
@@ -173,6 +189,10 @@ def prepare_home(profile: 'Profile', paths: ProfilePaths, host: HostContext) -> 
     directories.append(t3_state / 'tools')
     for directory in directories:
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # Podman would create a missing file mountpoint as container root.
+    if readonly_mounts(profile, host):
+        descriptor = os.open(paths.home / '.gitconfig', os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        os.close(descriptor)
     # Return canonical sources, including any safe pre-existing state symlinks.
     return [(source.resolve(), destination) for source, destination in mounts]
 

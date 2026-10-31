@@ -81,8 +81,8 @@ elif a[0] == 'run':
     mounts = []
     for i, item in enumerate(a):
         if i and a[i-1] == '--mount':
-            fields = dict(pair.split('=', 1) for pair in item.split(','))
-            mounts.append({'Type': 'bind', 'Source': fields['src'], 'Destination': fields['dst']})
+            fields = dict(pair.partition('=')[::2] for pair in item.split(','))
+            mounts.append({'Type': 'bind', 'Source': fields['src'], 'Destination': fields['dst'], 'RW': 'ro' not in fields})
     publish = a[a.index('--publish') + 1].rsplit(':', 2)
     state.setdefault('container', {})[name] = {'Id': name, 'Name': name, 'Image': 'sha256:test-image',
         'Config': {'Labels': labels, 'Env': [a[i+1] for i,v in enumerate(a) if v == '--env']}, 'Mounts': mounts,

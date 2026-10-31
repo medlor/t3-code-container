@@ -26,6 +26,7 @@ help:
 	@echo 'make shell      Open an interactive bash session'
 	@echo 'make exec CMD="codex login --device-auth"'
 	@echo 'make exec CMD="claude auth login"'
+	@echo 'make exec CMD="gh auth status"'
 	@echo 'make pair       Generate a fresh T3 pairing link'
 	@echo 'make smoke      Check tools, network, and host file ownership'
 	@echo 'make logs       Follow logs (Ctrl-C leaves container running)'

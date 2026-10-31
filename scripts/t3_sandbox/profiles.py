@@ -63,6 +63,9 @@ class StateSettings:
     t3_directory: Path
     codex_directory: Path
     claude_directory: Path
+    share_host_gh_state: bool
+    gh_directory: Path
+    gitconfig_file: Path
 
 
 @dataclass(frozen=True)
@@ -239,7 +242,9 @@ def decode_profile(data: bytes, *, name: str, source: Path, host: HostContext) -
         ResourceSettings(memory, cpus, pids),
         StateSettings(_bool(state["share_host_provider_state"], "state.share_host_provider_state"),
                       _bool(state["share_host_t3_state"], "state.share_host_t3_state"),
-                      *(_path(state[key], f"state.{key}", host) for key in ("t3_directory", "codex_directory", "claude_directory"))),
+                      *(_path(state[key], f"state.{key}", host) for key in ("t3_directory", "codex_directory", "claude_directory")),
+                      _bool(state["share_host_gh_state"], "state.share_host_gh_state"),
+                      *(_path(state[key], f"state.{key}", host) for key in ("gh_directory", "gitconfig_file"))),
         RuntimeSettings(None if runtime["env_file"] is None else _path(runtime["env_file"], "runtime.env_file", host),
                         _bool(runtime["automatic_healthcheck"], "runtime.automatic_healthcheck"), hostname),
         NetworkSettings(_bool(network["restricted"], "network.restricted"), normalize_allowlist(Allowlist(

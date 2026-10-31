@@ -118,6 +118,42 @@ class StorageTests(unittest.TestCase):
                             if shared:
                                 self.assertTrue((f.host.home / leaf).is_dir())
 
+    def test_gitconfig_mount_rejects_unsafe_sources_and_home_links(self):
+        with ProfileFixture() as f:
+            paths = self.paths(f)
+            paths.runtime.mkdir(parents=True)
+            secret = paths.runtime / 'policy'
+            secret.write_text('x')
+            profile = f.load('work', {'state': {'gitconfig_file': str(secret)}})
+            with self.assertRaisesRegex(ValueError, 'Read-only mount'):
+                storage.validate_storage(profile, paths, f.host)
+            (f.host.home / '.gitconfig').mkdir()
+            profile = f.load('work', {})
+            with self.assertRaisesRegex(ValueError, 'Read-only mount'):
+                storage.validate_storage(profile, paths, f.host)
+            (f.host.home / '.gitconfig').rmdir()
+            (f.host.home / '.gitconfig').write_text('')
+            paths.home.mkdir(parents=True)
+            unrelated = f.root / 'unrelated'
+            unrelated.write_text('x')
+            (paths.home / '.gitconfig').symlink_to(unrelated)
+            with self.assertRaisesRegex(ValueError, 'regular file'):
+                storage.prepare_home(profile, paths, f.host)
+            self.assertEqual(unrelated.read_text(), 'x')
+
+    def test_gh_sharing_is_independent_and_on_by_default(self):
+        with ProfileFixture() as f:
+            for gh in (None, False, True):
+                with self.subTest(gh=gh):
+                    state = {'share_host_provider_state': False}
+                    if gh is not None:
+                        state['share_host_gh_state'] = gh
+                    profile = f.load('work', {'state': state})
+                    mounts = storage.prepare_home(profile, self.paths(f), f.host)
+                    shared = gh is not False
+                    self.assertEqual(((f.host.home / '.config/gh').resolve(), '/home/testuser/.config/gh') in mounts, shared)
+                    self.assertTrue((self.paths(f).home / '.config/gh').is_dir())
+
     def test_policy_runtime_and_logs_cannot_be_inside_any_writable_mount(self):
         # Removing real-path overlap checks exposes policy through a project or state bind.
         with ProfileFixture() as f:
@@ -125,11 +161,12 @@ class StorageTests(unittest.TestCase):
             for protected in [paths.runtime, paths.logs, paths.profile_file.parent, paths.lock]:
                 for source in [protected, protected.parent, protected / 'nested']:
                     for section, key in [('project', 'directory'), ('state', 'codex_directory'),
-                                         ('state', 'claude_directory'), ('state', 't3_directory')]:
+                                         ('state', 'claude_directory'), ('state', 't3_directory'),
+                                         ('state', 'gh_directory')]:
                         with self.subTest(source=source, key=key):
                             paths.profile_file.unlink(missing_ok=True)
                             profile = f.load('work', {section: {key: str(source)}, 'state': {
-                                'share_host_provider_state': True, 'share_host_t3_state': True,
+                                'share_host_provider_state': True, 'share_host_t3_state': True, 'share_host_gh_state': True,
                                 **({key: str(source)} if section == 'state' else {})}})
                             with self.assertRaises(ValueError):
                                 storage.prepare_home(profile, paths, f.host)
@@ -163,10 +200,11 @@ class StorageTests(unittest.TestCase):
 
     def test_private_state_symlink_cannot_write_protected_state(self):
         with ProfileFixture() as f:
-            profile = f.load('work', {'state': {'share_host_provider_state': False}})
+            profile = f.load('work', {'state': {'share_host_provider_state': False, 'share_host_gh_state': False}})
             paths = self.paths(f)
             paths.home.mkdir(parents=True)
-            for leaf in ['.codex', '.claude', '.t3']:
+            (paths.home / '.config').mkdir()
+            for leaf in ['.codex', '.claude', '.t3', '.config/gh']:
                 link = paths.home / leaf
                 link.symlink_to(paths.logs, target_is_directory=True)
                 with self.subTest(leaf=leaf), self.assertRaises(ValueError):

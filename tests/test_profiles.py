@@ -39,6 +39,7 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual((p.server.bind_address, p.server.port), ("0.0.0.0", 3774))
             self.assertTrue(p.state.share_host_t3_state)
             self.assertTrue(p.state.share_host_provider_state)
+            self.assertTrue(p.state.share_host_gh_state)
             self.assertEqual(p.project.directory, f.host.home / "projects/t3-sandbox/default")
             self.assertFalse(p.project.directory.exists())
             self.assertFalse((f.host.home / ".local").exists())
